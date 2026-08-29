@@ -13,8 +13,8 @@ files.
 | `serve.py` | Local HTTP server: serves the console AND runs the exporter behind it. |
 | `map2model-console.html` | The web console. Single file, no build step. |
 | `test_console.js` | Offline harness for the console: stubs the DOM, Leaflet and three.js and invokes every top-level function. `node test_console.js`. |
-| `landmarks.json` | **MISSING from this folder.** Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it silently when it is absent, so the CN Tower currently renders as straight prisms in preview *and* export. Recreate it or drop the reference. |
-| `test_offline.py` | **MISSING from this folder.** Offline fixture — stubs `fetch_all()` so you can test without network. The Testing section below cannot run until it is restored. |
+| `landmarks.json` | Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it **silently** when it is absent — so if it goes missing the CN Tower renders as straight prisms in preview *and* export, with no warning anywhere. It is tracked in git for exactly that reason. |
+| `test_offline.py` | **MISSING from this folder.** Offline fixture — stubs `fetch_all()` so you can test without network. Never committed and not in the Recycle Bin, so it has to be rewritten; the Testing section below cannot run until it is. |
 
 ## Running it
 
@@ -70,6 +70,24 @@ One AMS = 4 filaments per plate, so the model is split:
 (which is what the console and the copied command both use) water rides the
 frame plate and no `_water` file is written. Anything reading the split output
 back — `serve.py` does — must look for `_frame`, `_water` *and* `_cover`.
+
+### Where the files land
+
+A bare `-o name.3mf` is routed to **`3Dmodels/name/`**, so a model's 2–3 plates
+sit together in one folder named after the model:
+
+```
+3Dmodels/toronto/toronto.3mf          terrain, greenery, roads, buildings
+3Dmodels/toronto/toronto_frame.3mf    frame + water
+3Dmodels/toronto/toronto_cover.3mf    cover_left, cover_right
+```
+
+`--split` writes its siblings next to whatever file it is handed, so without
+this the plates scatter through the working directory and only belong together
+by name. `model_out_path()` does the routing and **leaves any path that already
+names a directory alone** — `serve.py` hands `run()` an absolute temp path, and
+an explicit `-o out/city.3mf` means the caller has already chosen.
+`3Dmodels/` is build output; `*.3mf` in `.gitignore` already covers it.
 
 Assembly: water prints as the frame's floor; the land plate has the water
 regions **cut clean through** so the blue shows; land glues on top; the two
@@ -187,9 +205,24 @@ Set `retry_empty_fetch=False` to skip the retry.
 
 ## Print-volume rules
 
-Every plate is measured in all three axes against `Config.build_volume_mm`
-(256 mm). There is **no `--build-volume` flag** — it is settable only in code.
-The console blocks at 250 mm with a customer-readable message.
+Target machine is a **Bambu Lab P1S**: 256 mm bed, 256 mm of Z. Two separate
+limits, not one number:
+
+| | Limit | Why |
+|---|---|---|
+| **The model** | 200 × 200 × 250 mm | 200 mm is the largest print-size button; 250 leaves margin under the 256 mm Z ceiling |
+| **Any one plate** | 256 mm in XY, 250 mm in Z | frame and cover are *legitimately* wider than the model — they wrap it — so a plate is measured against the bed, not against 200 |
+
+In code that is `Config.bed_mm` (256.0, XY) and `Config.max_height_mm` (250.0,
+Z). They replaced a single `build_volume_mm = 256.0` that was applied to all
+three axes, which let a 254 mm cover pass the exporter while the console — which
+has always used 250 — warned about it. There is **no CLI flag** for either; they
+are settable only in code.
+
+The console *warns*, it does not block: over 250 mm it writes a
+customer-readable `sizeNote` ("This will not print"), and past `250 × 0.85` a
+"close to the limit" note, but the build still runs. `test_console.js` pins
+that behaviour ("a cover close to the ceiling warns without blocking").
 
 Cover height = `2.4 + tallest building + 10.0 + 3.0` mm, so it overflows once
 the model passes ~240 mm. Building stretch is what usually causes this.
@@ -312,10 +345,14 @@ something instead of asserting against itself.
 
 ## Known gaps / next steps
 
-- `landmarks.json` and `test_offline.py` are gone from the folder. Until
-  `landmarks.json` is restored the CN Tower has no flare anywhere — preview and
-  export now agree, both wrong. (The old note here blamed a missing
-  `--landmarks` flag on the CLI; the file itself is what is missing.)
+- `test_offline.py` is still missing. It was never committed and is not in the
+  Recycle Bin, so it has to be rewritten from the snippet in Testing, below.
+- **Untracked files in this folder are not safe.** `landmarks.json` and every
+  `.3mf` were deleted out from under the project and only came back from the
+  Recycle Bin; `git log --all` has no record of either, because neither was
+  ever committed. `landmarks.json` is tracked now. `test_offline.py` was not so
+  lucky. Anything that is source and not output belongs in git the day it is
+  written.
 - **A preview is slow enough to look broken.** One 1.6 km London tile measured
   11m15s end to end: 4m10s fetching buildings and 4m17s fetching roads, against
   ~15s of actual meshing. The console's copy promises "usually a few minutes".

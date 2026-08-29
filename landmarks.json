@@ -1,0 +1,25 @@
+[
+  {
+    "name": "CN Tower",
+    "_comment": "profile = [metres above ground, radius multiplier]. Anchored to ABSOLUTE height and applied about the TOPMOST part's centroid, which is the true tower axis. Scaling a leg about the axis moves it inward and shrinks it while preserving its orientation, so the three legs converge into the shaft with their inward face still pointing at the core. `parts` entries match on that part's own top/base height or footprint width in metres; first match wins.",
+    "parts": [
+      {
+        "_what": "the three flared legs: any part topping out low. They start ~17 m off-axis and ~18 m wide, so 0.42 tucks them inside the 22 m shaft by the time they end. Add \"rotate\": <degrees> here if the legs need angular alignment.",
+        "top_max": 200,
+        "profile": [[0, 1.15], [35, 0.92], [70, 0.68], [110, 0.42]]
+      },
+      {
+        "_what": "the mast: merged into one smooth rod (no bands) and needled in. min_feature thins THIS part only - drop toward 0.6 for a finer spire if your nozzle allows.",
+        "base_min": 400,
+        "profile": [[400, 1.0], [553, 0.25]],
+        "min_feature": 0.7
+      }
+    ],
+    "profile": [[0, 1.0]]
+  },
+  {
+    "name": "Rogers Centre",
+    "_comment": "Dome comes from roof_shape; leave the geometry alone.",
+    "profile": [[0, 1.0]]
+  }
+]

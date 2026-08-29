@@ -6,6 +6,9 @@
 # Studio carries slicer settings and plate layout that the exporter cannot
 # reproduce. If you have tuned one, track it deliberately:
 #     git add -f toyko.3mf
+#
+# Exports land in 3Dmodels/<name>/, one folder per model; *.3mf matches
+# at any depth so the whole tree is covered.
 *.3mf
 
 # Python

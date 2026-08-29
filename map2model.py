@@ -168,7 +168,14 @@ class Config:
     cover_lip_mm: float = 6.0        # how far the lips reach under the frame
     cover_lip_thickness_mm: float = 2.4
     box_headroom_mm: float = 10.0    # clear air above the tallest building
-    build_volume_mm: float = 256.0   # printer envelope; every plate must fit
+    # P1S envelope. The bed is 256 mm square and the gantry clears 256 mm on
+    # Z, but the printable ceiling is treated as 250 mm to leave margin. The
+    # MODEL is capped at 200 x 200 x 250: 200 is the largest print-size button,
+    # and the console policed 250 on Z long before this did. Frame and cover
+    # plates are legitimately wider than the model - they wrap it - so a PLATE
+    # is measured against the bed, not against 200.
+    bed_mm: float = 256.0            # XY any one plate has to fit on
+    max_height_mm: float = 250.0     # usable Z; the machine itself does 256
 
     water_in_frame: bool = False     # water becomes the frame's floor and
                                      # the land model is cut through where
@@ -1726,9 +1733,9 @@ def build_box(cfg, W, H, model_top_mm):
               f"{2 * clr:.2f} mm play in every direction", file=sys.stderr)
         print(f"         {cfg.box_headroom_mm:.1f} mm of air above the tallest "
               f"point; corner posts carry the ceiling", file=sys.stderr)
-        BV = cfg.build_volume_mm
-        if max(out_y, out_x / 2) > BV or total_z > BV:
-            print(f"  [warn] the cover does not fit a {BV:.0f} mm build volume "
+        if max(out_y, out_x / 2) > cfg.bed_mm or total_z > cfg.max_height_mm:
+            print(f"  [warn] the cover does not fit a {cfg.bed_mm:.0f} x "
+                  f"{cfg.bed_mm:.0f} x {cfg.max_height_mm:.0f} mm build volume "
                   f"({out_x / 2:.0f} x {out_y:.0f} x {total_z:.0f} mm per half)",
                   file=sys.stderr)
     return left, right
@@ -2140,10 +2147,35 @@ class Scale:
 terr_min = [0.0]   # module-level so the drape/emit helpers can reach it
 
 
+MODELS_DIR = "3Dmodels"
+
+
+def model_out_path(out_path):
+    """
+    Route a bare filename into 3Dmodels/<name>/<name>.3mf.
+
+    --split writes its siblings next to whatever file it is handed, so one
+    model is 2-3 .3mf files that only belong together by their names. Giving
+    each model its own folder under 3Dmodels/ keeps a set together instead of
+    scattering plates through the working directory.
+
+    A path that already names a directory is returned untouched: serve.py
+    hands run() an absolute temp path, and an explicit `-o out/city.3mf` means
+    the caller has already chosen where it goes.
+    """
+    if os.path.dirname(out_path):
+        return out_path
+    stem = os.path.splitext(os.path.basename(out_path))[0]
+    return os.path.join(MODELS_DIR, stem, out_path)
+
+
 def run(cfg, out_path):
     from shapely.geometry import box
 
+    out_path = model_out_path(out_path)
     print(f"map2model {__version__}  source={cfg.source}  lod={cfg.lod}",
+          file=sys.stderr)
+    print(f"  writing to {os.path.dirname(os.path.abspath(out_path))}",
           file=sys.stderr)
     proj = Projector(cfg.bbox)
     span_x = proj.maxx - proj.minx
@@ -2425,7 +2457,7 @@ def run(cfg, out_path):
                                     float(allv[:, 1].max() - allv[:, 1].min()),
                                     float(allv[:, 2].max() - allv[:, 2].min()))
             print("", file=sys.stderr)
-            BV = cfg.build_volume_mm
+            bed, maxz = cfg.bed_mm, cfg.max_height_mm
             over = []
             for path, names in written:
                 dims = plate_size.get(path)
@@ -2434,17 +2466,18 @@ def run(cfg, out_path):
                       file=sys.stderr)
                 if dims:
                     w, d, hgt = dims
-                    fits = max(w, d) <= BV and hgt <= BV
+                    fits = max(w, d) <= bed and hgt <= maxz
                     print(f"      {w:.1f} x {d:.1f} x {hgt:.1f} mm"
                           + ("" if fits else "   DOES NOT FIT"), file=sys.stderr)
                     if not fits:
                         over.append((path, w, d, hgt))
             if over:
                 print("", file=sys.stderr)
-                print(f"  [warn] {len(over)} plate(s) exceed the {BV:.0f} mm build "
-                      f"volume and cannot be printed:", file=sys.stderr)
+                print(f"  [warn] {len(over)} plate(s) exceed the {bed:.0f} x "
+                      f"{bed:.0f} x {maxz:.0f} mm build volume and cannot be "
+                      f"printed:", file=sys.stderr)
                 for path, w, d, hgt in over:
-                    axis = "height" if hgt > BV else "footprint"
+                    axis = "height" if hgt > maxz else "footprint"
                     print(f"         {os.path.basename(path)}  {w:.0f} x {d:.0f} "
                           f"x {hgt:.0f} mm  ({axis})", file=sys.stderr)
                 print("         Reduce the print size, or lower the building "
@@ -2459,6 +2492,9 @@ def run(cfg, out_path):
                       "\n  then water and frame as single-colour plates.",
                       file=sys.stderr)
         else:
+            d = os.path.dirname(os.path.abspath(out_path))
+            if d:
+                os.makedirs(d, exist_ok=True)
             write_3mf(out_path, layers)
 
     if cfg.verbose:
