@@ -1,0 +1,1949 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ECM Model 64 · City Planner</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#16202B; --ink-70:#41535F; --ink-40:#7D8D98;
+  --sheet:#E4EBEF; --panel:#F4F8FA; --rule:#BFCDD6; --rule-soft:#D8E2E8;
+  --warn:#B4542A;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
+  --cond:"IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font-family:var(--sans);color:var(--ink);background:var(--sheet);
+  font-size:14px;line-height:1.45;
+  background-image:linear-gradient(var(--rule-soft) 1px,transparent 1px),
+                   linear-gradient(90deg,var(--rule-soft) 1px,transparent 1px);
+  background-size:28px 28px}
+.app{display:grid;grid-template-rows:auto 1fr auto;height:100dvh}
+
+header{display:flex;align-items:baseline;gap:18px;padding:12px 20px;
+  background:var(--ink);color:var(--sheet)}
+.wordmark{font-family:var(--mono);font-weight:600;font-size:15px;letter-spacing:-.02em}
+.wordmark span{color:#4E8FD0;padding:0 2px}
+.tag{font-family:var(--cond);font-size:11px;letter-spacing:.14em;
+  text-transform:uppercase;color:#8FA5B4}
+header .spacer{flex:1}
+.readout{font-family:var(--mono);font-size:12px;display:flex;gap:16px;align-items:center;
+  flex-wrap:wrap;justify-content:flex-end}
+.readout b{font-weight:500;color:#fff}
+.readout .lbl{color:#8FA5B4;font-family:var(--cond);letter-spacing:.1em;
+  text-transform:uppercase;font-size:10px}
+.chip-warn{background:var(--warn);color:#fff;padding:2px 8px;border-radius:2px;font-size:11px}
+.chip-ok{background:#1E5E36;color:#CFEBD9;padding:2px 8px;border-radius:2px;font-size:11px}
+
+.main{display:grid;grid-template-columns:1fr 392px;min-height:0}
+.left{display:grid;grid-template-rows:auto 1fr;min-height:0;border-right:1px solid var(--rule)}
+.viewport{position:relative;min-height:0;overflow:hidden}
+.viewport > *{position:absolute;inset:0}
+#map{position:absolute;inset:0;background:#C9D6DE}
+
+.tabs{display:flex;gap:0;background:var(--ink);padding:0 12px;align-items:stretch}
+.tabs button{border:0;border-radius:0;background:transparent;color:#8FA5B4;padding:9px 15px;
+  font-family:var(--cond);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+  border-bottom:2px solid transparent;cursor:pointer}
+.tabs button.on{color:#fff;border-bottom-color:#4E8FD0}
+.tabs button:hover{background:#22303C;color:#fff}
+.tabs .grow{flex:1}
+.tabs .mode{display:inline-flex;align-self:center;margin-left:10px}
+.tabs .mode button{padding:4px 10px;border:1px solid #3B4C58;color:#8FA5B4;
+  letter-spacing:.08em}
+.tabs .mode button.on{background:#2E6FB7;border-color:#2E6FB7;color:#fff}
+.tabs .mode button:first-child{border-radius:2px 0 0 2px;border-right:0}
+.tabs .mode button:last-child{border-radius:0 2px 2px 0}
+.tabs .status{font-family:var(--mono);font-size:11px;color:#8FA5B4;align-self:center;
+  padding-right:10px}
+#btnRefresh{color:#CFE0EC}
+
+.maptools{position:absolute;z-index:900;top:12px;left:12px;display:flex;gap:6px;flex-wrap:wrap}
+.maptools input[type=search]{width:210px;padding:7px 10px;border:1px solid var(--ink);
+  border-radius:2px;font-family:var(--sans);font-size:13px;background:#fff}
+
+.stage{background:radial-gradient(circle at 50% 30%,#FBFCFD 0%,#E3EBF0 58%,#C9D6DE 100%)}
+.stage canvas{display:block;width:100%;height:100%;cursor:grab}
+.stage canvas:active{cursor:grabbing}
+.stage .overlay{position:absolute;inset:0;display:grid;place-items:center;text-align:center;
+  padding:26px;gap:14px;align-content:center}
+.stage .overlay p{max-width:340px;margin:0;font-size:13px;color:var(--ink-70)}
+.stage .legend{position:absolute;left:12px;bottom:12px;display:flex;gap:12px;flex-wrap:wrap;
+  font-family:var(--mono);font-size:10.5px;color:var(--ink-70);background:rgba(255,255,255,.85);
+  padding:6px 9px;border:1px solid var(--rule);border-radius:2px}
+.stage .legend i{display:inline-block;width:9px;height:9px;border-radius:1px;margin-right:5px;
+  border:1px solid rgba(0,0,0,.28)}
+.working{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;
+  display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12px;
+  color:var(--ink);background:rgba(255,255,255,.94);border:1px solid var(--rule);
+  border-left:3px solid #2E6FB7;border-radius:2px;padding:8px 14px;
+  box-shadow:0 2px 10px rgba(22,32,43,.12)}
+.working .dot{width:9px;height:9px;border-radius:50%;background:#2E6FB7;
+  animation:pulse 1.1s ease-in-out infinite;flex:none}
+@keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}
+.attrib{position:absolute;right:12px;bottom:12px;font-family:var(--mono);font-size:10px;
+  color:var(--ink-40);background:rgba(255,255,255,.85);padding:4px 8px;
+  border:1px solid var(--rule);border-radius:2px}
+.attrib a{color:var(--ink-70)}
+.disclaimer{position:absolute;left:12px;right:12px;top:12px;font-size:11.5px;
+  line-height:1.45;color:var(--ink-70);background:rgba(255,255,255,.9);
+  border:1px solid var(--rule);border-left:3px solid var(--warn);border-radius:2px;
+  padding:7px 11px;max-width:640px}
+.disclaimer strong{color:var(--warn)}
+.disclaimer.exact{border-left-color:#2E8B4C}
+.disclaimer.exact strong{color:#2E8B4C}
+.stage .hud{position:absolute;right:12px;top:60px;font-family:var(--mono);font-size:10.5px;
+  color:var(--ink-70);background:rgba(255,255,255,.85);padding:6px 9px;border:1px solid var(--rule);
+  border-radius:2px;text-align:right;line-height:1.6}
+.buildlog{font-family:var(--mono);font-size:11.5px;text-align:left;min-width:330px;
+  max-width:420px;background:rgba(255,255,255,.9);border:1px solid var(--rule);
+  border-radius:2px;padding:10px 12px;display:grid;gap:4px}
+.buildlog .step{display:flex;gap:8px;align-items:baseline}
+.buildlog .mark{width:14px;flex:none;color:var(--ink-40)}
+.buildlog .step.done .mark{color:#2E8B4C}
+.buildlog .step.fail .mark{color:var(--warn)}
+.buildlog .step.now .mark{color:#2E6FB7}
+.buildlog .step.pend{color:var(--ink-40)}
+.buildlog .step.now{font-weight:500}
+.buildlog .step .det{margin-left:auto;color:var(--ink-40);font-size:10.5px}
+.buildlog .elapsed-row{display:flex;justify-content:space-between;
+  border-top:1px dotted var(--rule);margin-top:4px;padding-top:5px;
+  font-weight:500;color:var(--ink)}
+.buildlog .note{border-top:1px dotted var(--rule);margin-top:4px;padding-top:6px;
+  color:var(--ink-70);font-family:var(--sans);font-size:11.5px;line-height:1.4}
+.spin{width:26px;height:26px;border:2px solid var(--rule);border-top-color:#4E8FD0;
+  border-radius:50%;animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+#vtmap{position:absolute;width:1100px;height:1100px;left:-4000px;top:0;
+  visibility:hidden;pointer-events:none}
+.hidden{display:none!important}
+
+.panel{overflow-y:auto;background:var(--panel)}
+section{border-bottom:1px solid var(--rule-soft);padding:14px 18px}
+h2{font-family:var(--cond);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+  margin:0 0 12px;color:var(--ink-70);display:flex;align-items:center;gap:8px}
+h2::after{content:"";flex:1;height:1px;background:var(--rule-soft)}
+.row{display:flex;align-items:center;gap:10px;margin-bottom:11px}
+.row:last-child{margin-bottom:0}
+label.t{flex:1;font-size:13px}
+.hint{font-size:11.5px;color:var(--ink-40);margin:-4px 0 10px;line-height:1.4}
+.sizewarn{color:var(--warn);border-left:3px solid var(--warn);padding-left:9px;
+  margin-top:8px}
+.sizeok{border-left:3px solid #2E8B4C;padding-left:9px;margin-top:8px}
+.disclaim-panel{border-left:3px solid var(--warn);padding-left:9px;
+  color:var(--ink-70);margin-top:10px}
+.disclaim-panel strong{color:var(--warn)}
+input[type=range]{flex:1.4;accent-color:#2E6FB7;min-width:0}
+input[type=number],select,input[type=text]{font-family:var(--mono);font-size:12.5px;
+  padding:5px 7px;border:1px solid var(--rule);border-radius:2px;background:#fff;
+  color:var(--ink);width:92px}
+select{width:auto;min-width:118px;font-family:var(--sans)}
+.val{font-family:var(--mono);font-size:12.5px;min-width:62px;text-align:right}
+
+.seg{display:flex;gap:0;width:100%}
+.seg button{flex:1;border-radius:0;border-right-width:0}
+.seg button:first-child{border-radius:2px 0 0 2px}
+.seg button:last-child{border-radius:0 2px 2px 0;border-right-width:1px}
+
+.films{display:grid;gap:8px}
+.film{display:flex;align-items:center;gap:10px;padding:8px 10px;background:#fff;
+  border:1px solid var(--rule);border-radius:2px;transition:opacity .15s}
+.film.off{opacity:.42}
+.swatch{width:24px;height:24px;border-radius:2px;border:1px solid rgba(0,0,0,.28);
+  flex:none;padding:0;background:none;cursor:pointer}
+.swatch::-webkit-color-swatch-wrapper{padding:1px}
+.swatch::-webkit-color-swatch{border:0;border-radius:1px}
+.swatch::-moz-color-swatch{border:0;border-radius:1px}
+.film .nm{flex:1;font-size:13px;font-weight:500}
+.film .slot{font-family:var(--mono);font-size:10.5px;background:#E8EEF2;
+  border:1px solid var(--rule);border-radius:2px;padding:1px 5px}
+.film .note{font-family:var(--mono);font-size:10.5px;color:var(--ink-40)}
+
+button{font-family:var(--sans);font-size:12.5px;font-weight:500;padding:7px 12px;
+  border:1px solid var(--ink);background:#fff;color:var(--ink);border-radius:2px;cursor:pointer}
+button:hover{background:var(--ink);color:#fff}
+button.on{background:var(--ink);color:#fff}
+button:focus-visible{outline:2px solid #2E6FB7;outline-offset:2px}
+
+.cmd{background:var(--ink);color:#DCE6EC;padding:12px 18px 14px}
+.cmdhead{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.cmdhead .lbl{font-family:var(--cond);font-size:10.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:#8FA5B4;flex:1}
+.cmd .os{display:flex}
+.cmd .os button{border-color:#3B4C58;background:transparent;color:#8FA5B4;border-radius:0;
+  padding:5px 11px}
+.cmd .os button.on{background:#2E6FB7;border-color:#2E6FB7;color:#fff}
+.cmd .os button:first-child{border-radius:2px 0 0 2px}
+.cmd .os button:last-child{border-radius:0 2px 2px 0}
+#copy{border-color:#3B4C58;background:transparent;color:#DCE6EC}
+#copy:hover{background:#2E6FB7;border-color:#2E6FB7;color:#fff}
+pre{margin:0;font-family:var(--mono);font-size:12.5px;line-height:1.65;white-space:pre-wrap;
+  word-break:break-all;background:#0E1720;padding:11px 13px;border-radius:2px;
+  border:1px solid #2A3A46;max-height:120px;overflow:auto}
+pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
+
+@media (max-width:940px){
+  .main{grid-template-columns:1fr;grid-template-rows:minmax(400px,54vh) 1fr}
+  .left{border-right:0;border-bottom:1px solid var(--rule)}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+
+<header>
+  <div class="wordmark">ECM Model 64 <span>·</span> City Planner</div>
+  <div class="spacer"></div>
+  <div class="readout">
+    <span><span class="lbl">tile</span> <b id="rTile">—</b></span>
+    <span><span class="lbl">model</span> <b id="rModel">—</b></span>
+    <span><span class="lbl">frame</span> <b id="rFrame">—</b></span>
+    <span><span class="lbl">scale</span> <b id="rScale">—</b></span>
+    <span id="rWarn"></span>
+  </div>
+</header>
+
+<div class="main">
+  <div class="left">
+    <div class="tabs">
+      <button id="tabMap" class="on">Map</button>
+      <button id="tabPrev">3D preview</button>
+      <button id="btnRefresh" class="hidden">↻ Rebuild</button>
+
+      <button id="btnLoad3mf" class="hidden">Open exported 3MF</button>
+      <input type="file" id="file3mf" accept=".3mf" multiple class="hidden">
+      <span class="grow"></span>
+      <span class="status" id="prevStatus"></span>
+    </div>
+    <div class="viewport">
+      <div id="paneMap">
+        <div id="map"></div>
+        <div class="maptools">
+          <input type="search" id="q" placeholder="Find a place…" aria-label="Find a place">
+          <button id="btnFind">Find</button>
+          <button id="btnDraw">Drag a tile</button>
+        </div>
+      </div>
+      <div id="vtmap" aria-hidden="true"></div>
+      <div class="stage hidden" id="panePrev">
+        <canvas id="gl"></canvas>
+        <div class="hud hidden" id="prevHud"></div>
+        <div class="disclaimer" id="prevDisclaimer">
+          <strong>Exact model.</strong> Built by map2model.py — the same geometry
+          the slicer receives.
+        </div>
+        <div class="working hidden" id="prevWorking">
+          <span class="dot"></span><span id="prevWorkingText">Loading roofs and
+          building parts…</span>
+        </div>
+        <div class="attrib" id="prevAttrib">
+          <a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> ·
+          <a href="https://www.openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> ·
+          Data from <a href="https://www.openstreetmap.org/copyright" target="_blank"
+          rel="noopener">OpenStreetMap</a>
+        </div>
+        <div class="legend hidden" id="prevLegend"></div>
+        <div class="overlay" id="prevOverlay">
+          <p id="prevMsg">Build a preview from live OpenStreetMap data for this tile.
+            Drag to orbit, scroll to zoom.<br><br><small>Fetching can take a good while —
+            usually under a minute, occasionally several. It has no bearing on how long
+            the export takes.</small><br><br><small>Already ran the command? <b>Open
+            exported 3MF</b> above shows the actual file — the exact model the printer
+            gets, taper, roofs and all.</small></p>
+          <button id="btnBuild">Build preview</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+
+    <section>
+      <h2>Tile</h2>
+      <div class="hint" id="areaHint">Drag a square tile on the map. Tiles are always
+        square so they seat in the frame.</div>
+      <div class="row"><label class="t" for="cLat">Centre</label>
+        <input type="number" id="cLat" step="0.0001" aria-label="Centre latitude">
+        <input type="number" id="cLng" step="0.0001" aria-label="Centre longitude"></div>
+      <div class="row"><label class="t" for="span">Tile width</label>
+        <input type="range" id="span" min="400" max="3000" step="50" value="1600">
+        <span class="val" id="vSpan">1600 m</span></div>
+      <div class="hint" id="sizeNote"></div>
+      <div class="row"><label class="t" for="out">File name</label>
+        <input type="text" id="out" placeholder="placeholder.3mf" style="width:150px"></div>
+    </section>
+
+    <section>
+      <h2>Print size</h2>
+      <div class="seg" id="sizes">
+        <button data-size="100">Small<br>100 mm</button>
+        <button data-size="150">Medium<br>150 mm</button>
+        <button data-size="200" class="on">Large<br>200 mm</button>
+      </div>
+      <div class="row"><label class="t" for="zex">Land relief</label>
+        <input type="range" id="zex" min="1" max="4" step="0.1" value="1">
+        <span class="val" id="vZex">1.0×</span></div>
+      <div class="row"><label class="t" for="bscale">Building stretch</label>
+        <input type="range" id="bscale" min="0.5" max="3" step="0.1" value="1">
+        <span class="val" id="vBscale">1.0×</span></div>
+      <div class="row"><label class="t" for="terrain">Include terrain relief</label>
+        <input type="checkbox" id="terrain" checked></div>
+    </section>
+
+    <section>
+      <h2>Filaments</h2>
+      <div class="row"><label class="t">Colour</label>
+        <div class="seg" style="flex:1.6">
+          <button id="modeFull" class="on">Five colours</button>
+          <button id="modeMono">One colour</button>
+        </div></div>
+      <div class="films" id="films"></div>
+      <div class="hint" id="filmHint"></div>
+    </section>
+
+    <section>
+      <h2>Detail</h2>
+      <div class="row"><label class="t" for="source">Data</label>
+        <select id="source">
+          <option value="overture">Overture — parts &amp; roofs</option>
+          <option value="osm">OpenStreetMap — outlines only</option>
+        </select></div>
+      <div class="row"><label class="t" for="lod">Geometry</label>
+        <select id="lod">
+          <option value="2">LOD2 — building parts</option>
+          <option value="1">LOD1 — one prism each</option>
+        </select></div>
+      <div class="row"><label class="t" for="roofs">Roofs</label>
+        <select id="roofs">
+          <option value="all" selected>All — every roof shape</option>
+          <option value="safe">Safe — only ridges with a known direction</option>
+          <option value="symmetric">Symmetric only — domes and cones</option>
+          <option value="none">Flat tops</option>
+        </select></div>
+      <div class="row"><label class="t" for="ridge">Ridge roof height</label>
+        <input type="range" id="ridge" min="0.2" max="0.98" step="0.01" value="0.98">
+        <span class="val" id="vRidge">0.98</span></div>
+      <div class="hint" id="detailHint"></div>
+    </section>
+
+    <section>
+      <h2>Frame</h2>
+      <div class="hint">Fixed at a 6 mm border, 7 mm deep, 0.3 mm clearance and a 2 mm
+        floor — a fit that survives being posted. Water prints into that floor as a
+        second filament and the land model is cut through so it shows, which keeps the
+        land plate at four filaments.</div>
+    </section>
+
+  </div>
+</div>
+
+<div class="cmd">
+  <div class="cmdhead">
+    <span class="lbl">Copy and paste this into the personalization text</span>
+    <button id="copy">Copy</button>
+  </div>
+  <pre id="out-cmd"></pre>
+</div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<link href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const R = 6378137;
+
+/* ---------------- filaments ---------------- */
+/* Objects leave the 3MF in this order and a slicer assigns filament slots in
+   the same order, so the panel lists them that way.                          */
+const FILMS = [
+  {k:'terrain',  nm:'Terrain',   col:'#61C680', note:'always on', locked:true},
+  {k:'water',    nm:'Water',     col:'#0078BF', note:'--no-water'},
+  {k:'greenery', nm:'Greenery',  col:'#FFFFFF', note:'--no-greenery'},
+  {k:'roads',    nm:'Roads',     col:'#1E2124', note:'--no-roads'},
+  {k:'buildings',nm:'Buildings', col:'#9BA3A8', note:'--no-buildings'},
+];
+const on  = {terrain:true, water:true, greenery:true, roads:true, buildings:true};
+const col = Object.fromEntries(FILMS.map(f=>[f.k, f.col]));
+let mono = false;
+const MONO_COL = '#EDEBE4', FRAME_COL = '#1E2124';
+const shown = k => mono ? MONO_COL : col[k];
+/* The renderer writes sRGB, so material colours must be given in LINEAR space.
+   Setting a hex straight onto a material skips that conversion and every
+   filament renders washed out. Always build material colours through FIL(). */
+const FIL = hex => new THREE.Color(hex).convertSRGBToLinear();
+
+function drawFilms(){
+  const wif = true;   // water always prints with the frame
+  let slot = 0;
+  $('films').innerHTML = FILMS.map(f=>{
+    const inPlate = on[f.k] && !(f.k==='water' && wif);
+    if(inPlate) slot++;
+    const tag = !on[f.k] ? 'off' : (f.k==='water'&&wif) ? 'frame plate' : 'slot '+slot;
+    return `<div class="film ${on[f.k]?'':'off'}">
+      <input type="color" class="swatch" value="${col[f.k]}" data-col="${f.k}"
+             ${mono?'disabled':''} aria-label="${f.nm} colour">
+      <span class="nm">${f.nm}</span><span class="slot">${tag}</span>
+      <span class="note">${f.note}</span>
+      <input type="checkbox" ${on[f.k]?'checked':''} ${f.locked?'disabled':''}
+             data-film="${f.k}" aria-label="Include ${f.nm}"></div>`;
+  }).join('');
+  $('films').querySelectorAll('[data-film]').forEach(cb=>
+    cb.addEventListener('change', ()=>{ on[cb.dataset.film]=cb.checked;
+      drawFilms(); sync(); repaint(); }));
+  $('films').querySelectorAll('[data-col]').forEach(ci=>
+    ci.addEventListener('input', ()=>{ col[ci.dataset.col]=ci.value; repaint(); }));
+}
+$('modeFull').addEventListener('click',()=>{mono=false;
+  $('modeFull').classList.add('on');$('modeMono').classList.remove('on');drawFilms();repaint();});
+$('modeMono').addEventListener('click',()=>{mono=true;
+  $('modeMono').classList.add('on');$('modeFull').classList.remove('on');drawFilms();repaint();});
+
+/* ---------------- square tile ---------------- */
+let centre = {lat:43.6455, lng:-79.3860}, spanM = 1600;
+
+function bboxOf(){
+  const dLat = spanM / 2 / 111320;
+  const dLng = spanM / 2 / (111320 * Math.cos(centre.lat*Math.PI/180));
+  return {w:centre.lng-dLng, e:centre.lng+dLng, s:centre.lat-dLat, n:centre.lat+dLat};
+}
+
+const map = L.map('map').setView([centre.lat, centre.lng], 14);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  {maxZoom:19, attribution:'© OpenStreetMap contributors'}).addTo(map);
+let rect = L.rectangle([[0,0],[0,0]],
+  {color:'#16202B', weight:2, fillColor:'#2E6FB7', fillOpacity:.12}).addTo(map);
+
+function placeRect(fit){
+  const b = bboxOf();
+  rect.setBounds([[b.s,b.w],[b.n,b.e]]);
+  if(fit) map.fitBounds(rect.getBounds(), {padding:[30,30]});
+  $('cLat').value = centre.lat.toFixed(4);
+  $('cLng').value = centre.lng.toFixed(4);
+  sync();
+}
+const tileChanged = ()=>{ if(cache) previewStale('The tile moved, so the preview is out of date.'); };
+$('cLat').addEventListener('change', ()=>{ centre.lat=+$('cLat').value; placeRect(true); tileChanged(); });
+$('cLng').addEventListener('change', ()=>{ centre.lng=+$('cLng').value; placeRect(true); tileChanged(); });
+$('span').addEventListener('change', ()=>{ spanM=+$('span').value; placeRect(false); tileChanged(); });
+$('span').addEventListener('input', ()=>{ spanM=+$('span').value; placeRect(false); });
+
+let drawing=false, origin=null, ghost=null, lastLL=null;
+
+/* The ghost must be removed on EVERY exit path. Releasing the mouse outside
+   the map container never fires Leaflet's mouseup, so the old code left the
+   dashed rectangle on the map and the next drag drew a second one. */
+function clearGhost(){
+  if(ghost){ map.removeLayer(ghost); ghost=null; }
+  origin=null; lastLL=null;
+}
+$('btnDraw').addEventListener('click', ()=>{
+  drawing=!drawing; $('btnDraw').classList.toggle('on', drawing);
+  if(!drawing) clearGhost();
+  map.dragging[drawing?'disable':'enable']();
+  $('map').style.cursor = drawing?'crosshair':'';
+  $('areaHint').textContent = drawing
+    ? 'Drag across the map. The tile snaps to a square.'
+    : 'Drag a square tile on the map. Tiles are always square so they seat in the frame.';
+});
+function squareFrom(a, b){
+  // force a square in METRES, not degrees, so it seats in the frame
+  const midLat = (a.lat+b.lat)/2;
+  const mx = Math.abs(b.lng-a.lng)*111320*Math.cos(midLat*Math.PI/180);
+  const my = Math.abs(b.lat-a.lat)*111320;
+  return {lat:midLat, lng:(a.lng+b.lng)/2, span:Math.max(Math.max(mx,my), 300)};
+}
+map.on('mousedown', e=>{ if(!drawing) return;
+  clearGhost();                      // never leave a previous ghost behind
+  origin=e.latlng; lastLL=e.latlng;
+  ghost=L.rectangle([[origin.lat,origin.lng],[origin.lat,origin.lng]],
+    {color:'#B4542A',weight:1,dashArray:'4 3',fillOpacity:.06}).addTo(map); });
+map.on('mousemove', e=>{ if(!drawing||!origin) return;
+  lastLL=e.latlng;
+  const s=squareFrom(origin,e.latlng);
+  const dLat=s.span/2/111320, dLng=s.span/2/(111320*Math.cos(s.lat*Math.PI/180));
+  ghost.setBounds([[s.lat-dLat,s.lng-dLng],[s.lat+dLat,s.lng+dLng]]); });
+
+function finishDraw(ll){
+  if(!drawing || !origin || !ll) return;
+  const s=squareFrom(origin,ll);
+  clearGhost();
+  centre={lat:s.lat,lng:s.lng}; spanM=Math.round(Math.min(s.span,3000)/50)*50;
+  $('span').value=spanM; $('btnDraw').click(); placeRect(false);
+  tileChanged();
+}
+map.on('mouseup', e=>finishDraw(e.latlng));
+/* Released off the map: Leaflet's mouseup never fires, so finish from the last
+   position we saw. Leaflet's own handler has already cleared `origin` when the
+   release was on the map, so this cannot double-fire. */
+document.addEventListener('mouseup', ()=>finishDraw(lastLL));
+
+async function find(){
+  const q=$('q').value.trim(); if(!q) return;
+  $('btnFind').textContent='…';
+  try{
+    const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='
+      +encodeURIComponent(q));
+    const j=await r.json();
+    if(j.length){ centre={lat:+j[0].lat,lng:+j[0].lon}; placeRect(true);
+      $('areaHint').textContent='Centred on '+(j[0].display_name||q).split(',')[0]+'.'; }
+    else $('areaHint').textContent='No match. Try a city or address.';
+  }catch(e){
+    $('areaHint').textContent = location.protocol==='file:'
+      ? 'Search could not connect. Serve this folder with python3 -m http.server, or just pan the map.'
+      : 'Search could not connect. Pan the map instead.';
+  }
+  $('btnFind').textContent='Find';
+}
+$('btnFind').addEventListener('click', find);
+$('q').addEventListener('keydown', e=>{ if(e.key==='Enter'){e.preventDefault();find();} });
+
+/* ---------------- settings ---------------- */
+let sizeMM = 200;
+$('sizes').querySelectorAll('button').forEach(b=>
+  b.addEventListener('click', ()=>{
+    sizeMM=+b.dataset.size;
+    $('sizes').querySelectorAll('button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on'); sync(); repaint();
+  }));
+const FRAME = {fw:6, fd:7, fc:0.3, ff:2};      // fixed: a fit that posts well
+const LAYER_MM = {greenery:0.8, roads:0.5, embed:0.35};  // matches the exporter
+const MIN_FEATURE_MM = 0.9;                             // matches --min-feature
+
+/* Scale a footprint about its own centre until its narrow axis reaches the
+   thinnest printable width. Uniform scaling, so the shape never distorts. */
+function widenToPrintable(pts, minW){
+  let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+  for(const p of pts){ if(p[0]<x0)x0=p[0]; if(p[0]>x1)x1=p[0];
+                       if(p[1]<y0)y0=p[1]; if(p[1]>y1)y1=p[1]; }
+  const narrow = Math.min(x1-x0, y1-y0);
+  if(!(narrow > 0) || narrow >= minW) return pts;
+  const k = Math.min(minW / narrow, 12);        // cap so a sliver can't explode
+  const cx=(x0+x1)/2, cy=(y0+y1)/2;
+  return pts.map(p=>[cx+(p[0]-cx)*k, cy+(p[1]-cy)*k]);
+}
+const S = () => ({
+  zex:+$('zex').value, bscale:+$('bscale').value, ridge:+$('ridge').value,
+  fw:FRAME.fw, fd:FRAME.fd, fc:FRAME.fc, ff:FRAME.ff
+});
+
+/* ---------------- command ---------------- */
+function buildCmd(){
+  const b=bboxOf(), v=S(), a=[];
+  a.push(`--bbox ${b.w.toFixed(4)} ${b.s.toFixed(4)} ${b.e.toFixed(4)} ${b.n.toFixed(4)}`);
+  a.push(`--size ${sizeMM}`);
+  if(v.zex!==1)    a.push(`--zexag ${v.zex.toFixed(1)}`);
+  if(v.bscale!==1) a.push(`--building-scale ${v.bscale.toFixed(1)}`);
+  if(!$('terrain').checked) a.push('--no-terrain');
+  ['water','greenery','roads','buildings'].forEach(k=>{ if(!on[k]) a.push('--no-'+k); });
+  if($('source').value!=='overture') a.push('--source osm');
+  if($('lod').value!=='2')           a.push('--lod 1');
+  if($('roofs').value!=='all') a.push(`--roofs ${$('roofs').value}`);
+  else a.push('--roofs all');
+  a.push(`--max-ridge-frac ${v.ridge}`);
+  a.push('--split', '--box');
+  a.push('--water-in-frame');
+  a.push('--frame', `--frame-width ${v.fw}`, `--frame-depth ${v.fd}`,
+         `--frame-clearance ${v.fc}`);
+  if(Math.abs(v.ff-2)>1e-9) a.push(`--frame-floor ${v.ff}`);
+  a.push(`-o ${$('out').value.trim()||'placeholder.3mf'}`);
+  return `python map2model.py ${a.join(' ')}`;
+}
+const paint = c => c.replace(/^(python)/,'<span class="prog">$1</span>')
+  .replace(/(--[a-z-]+)/g,'<span class="flag">$1</span>')
+  .replace(/(\s)(-?\d+\.?\d*)(?=\s|$)/g,'$1<span class="num">$2</span>');
+$('copy').addEventListener('click', async ()=>{
+  try{ await navigator.clipboard.writeText(buildCmd()); $('copy').textContent='Copied'; }
+  catch(e){ $('copy').textContent='Select it manually'; }
+  setTimeout(()=>$('copy').textContent='Copy',1400);
+});
+
+/* ---------------- readouts ---------------- */
+function sync(){
+  const v=S();
+  $('vSpan').textContent   = spanM+' m';
+  $('vZex').textContent    = v.zex.toFixed(1)+'×';
+  $('vBscale').textContent = v.bscale.toFixed(1)+'×';
+  $('vRidge').textContent  = v.ridge.toFixed(2);
+
+  const mpmm = spanM/sizeMM, outer = sizeMM + 2*v.fc + 2*v.fw;
+  $('rTile').textContent  = (spanM/1000).toFixed(2)+' km square';
+  $('rModel').textContent = sizeMM+' × '+sizeMM+' mm';
+  $('rFrame').textContent = outer.toFixed(0)+' × '+outer.toFixed(0)+' mm';
+  $('rScale').textContent = mpmm.toFixed(1)+' m/mm';
+  // What the nozzle can resolve, put in terms a customer can act on: anything
+  // narrower than the thinnest printable wall gets fattened to reach it.
+  const lost = 0.9 * mpmm;                    // real-world metres that thicken
+  const ratio = Math.round(spanM * 1000 / sizeMM);
+  const best = Math.floor(sizeMM * 8 / 50) * 50;   // widest tile still under 8 m/mm
+  $('rScale').textContent = `1:${ratio.toLocaleString()}`;
+  if(outer > 256){
+    $('rWarn').innerHTML = '<span class="chip-warn">frame exceeds the print plate</span>';
+    $('sizeNote').innerHTML = '<strong>Too large to print.</strong> Choose a smaller '
+      + 'print size.';
+    $('sizeNote').className = 'hint sizewarn';
+  } else if(mpmm > 8){
+    $('rWarn').innerHTML = '<span class="chip-warn">too coarse — detail will be lost</span>';
+    $('sizeNote').innerHTML = `<strong>This area is too big for the detail to survive.</strong>
+      At 1:${ratio.toLocaleString()}, anything narrower than about ${lost.toFixed(0)} m —
+      spires, masts, narrow streets — gets thickened so it can print.
+      Try a tile of about ${best} m, or step up to a larger print size.`;
+    $('sizeNote').className = 'hint sizewarn';
+  } else {
+    $('rWarn').innerHTML = '<span class="chip-ok">detail will hold</span>';
+    $('sizeNote').innerHTML = `At 1:${ratio.toLocaleString()}, features down to about
+      ${lost.toFixed(0)} m come through cleanly.`;
+    $('sizeNote').className = 'hint sizeok';
+  }
+
+  const wif=true;
+  const n = 1 + ['greenery','roads','buildings'].filter(k=>on[k]).length
+              + (on.water && !wif ? 1 : 0);
+  $('filmHint').textContent = mono
+    ? `Everything prints in one colour; the frame stays black. Land plate: 1 filament.`
+    : (wif ? `Land plate uses ${n} filament${n>1?'s':''}. Water prints with the frame.`
+           : `Land plate uses ${n} filament${n>1?'s':''}.`);
+
+  $('detailHint').textContent = {
+    symmetric:'Domes, cones and pyramids only. Built from the footprint alone, so nothing can face the wrong way.',
+    safe:'Adds gabled and hipped roofs, but only where the data says which way they run.',
+    all:'Includes ridge roofs whose direction is guessed. Near-square buildings may point the wrong way.',
+    none:'Every building gets a flat top.'}[$('roofs').value];
+
+  $('out-cmd').innerHTML = paint(buildCmd());
+}
+
+/* ================= 3D preview ================= */
+const ROAD_W = {motorway:22,trunk:18,primary:15,secondary:12,tertiary:10,
+  residential:8,living_street:7,unclassified:8,pedestrian:5};
+const RIDGE = ['gabled','hipped','half_hipped','skillion','saltbox','sawtooth','mansard','gambrel'];
+const ROUND = ['dome','spherical','round','onion','cone','pyramidal'];
+
+let three=null, cache=null, cacheKey='';
+
+function glInit(){
+  if(three) return three;
+  const cv=$('gl');
+  const renderer=new THREE.WebGLRenderer({canvas:cv,antialias:true,alpha:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  // COLOUR PIPELINE. three r128 defaults outputEncoding to LinearEncoding, so
+  // an sRGB hex like #61C680 was being lit as though it were already linear and
+  // then written straight to the canvas. Everything came out pale and chalky --
+  // the swatch in the legend never matched the model. Render linear, convert on
+  // the way out (sRGBEncoding), and feed the materials linear colours via
+  // FIL(): see filamentColour() below.
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;   // stops white clipping
+  renderer.toneMappingExposure = 0.95;
+  const scene=new THREE.Scene();
+  const camera=new THREE.PerspectiveCamera(38,1,0.5,8000);
+  // A single high key light leaves every vertical wall lit the same, so a
+  // city of boxes reads as one grey mass. Light the four sides differently
+  // instead: a low warm key, a cool fill from the opposite side, and a rim
+  // across the third axis. Corners then separate without any shadow pass.
+  // Keep the four-way separation, but pull the total down. The old rig summed
+  // to ~2.1 of near-white light: every surface sat near the top of its range,
+  // where hue washes out no matter what colour the filament is.
+  scene.add(new THREE.HemisphereLight(0xF2F7FA, 0x8A9AA6, 0.34));
+  scene.add(new THREE.AmbientLight(0xffffff, 0.08));
+  const key  = new THREE.DirectionalLight(0xFFF6E8, 0.62);
+  key.position.set(-260, 190, 150); scene.add(key);
+  const fill = new THREE.DirectionalLight(0xBFD6E8, 0.26);
+  fill.position.set(230, 90, -170); scene.add(fill);
+  const rim  = new THREE.DirectionalLight(0xE8F0F6, 0.20);
+  rim.position.set(60, 40, 300); scene.add(rim);
+  const root=new THREE.Group(); scene.add(root);
+  const cam={az:-0.75,el:0.85,r:430,tgt:new THREE.Vector3(0,0,0)};
+  function place(){ const ce=Math.cos(cam.el);
+    camera.position.set(cam.tgt.x+cam.r*ce*Math.cos(cam.az), cam.tgt.y+cam.r*Math.sin(cam.el),
+      cam.tgt.z+cam.r*ce*Math.sin(cam.az)); camera.lookAt(cam.tgt); }
+  let drag=null;
+  cv.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY};cv.setPointerCapture(e.pointerId);});
+  cv.addEventListener('pointermove',e=>{ if(!drag)return;
+    cam.az-=(e.clientX-drag.x)*0.006;
+    cam.el=Math.max(0.06,Math.min(1.5,cam.el+(e.clientY-drag.y)*0.005));
+    drag={x:e.clientX,y:e.clientY}; place(); render(); });
+  const stop=()=>{drag=null;};
+  cv.addEventListener('pointerup',stop); cv.addEventListener('pointercancel',stop);
+  cv.addEventListener('wheel',e=>{e.preventDefault();
+    cam.r=Math.max(50,Math.min(3000,cam.r*(1+Math.sign(e.deltaY)*0.11))); place(); render();},
+    {passive:false});
+  function resize(){ const p=$('panePrev');
+    renderer.setSize(p.clientWidth||640, p.clientHeight||420, false);
+    camera.aspect=(p.clientWidth||640)/(p.clientHeight||420); camera.updateProjectionMatrix(); }
+  function render(){ resize(); renderer.render(scene,camera); }
+  addEventListener('resize',()=>{ if(!$('panePrev').classList.contains('hidden')) render(); });
+  three={renderer,scene,camera,root,cam,place,render};
+  return three;
+}
+
+/* Sutherland–Hodgman: clip a polygon to the tile. Without this, Lake Ontario
+   arrives as one enormous polygon and paints over the whole model.          */
+function clipPoly(pts, R_){
+  const inside=(p,e)=> e===0? p[0]>=R_.x0 : e===1? p[0]<=R_.x1 : e===2? p[1]>=R_.y0 : p[1]<=R_.y1;
+  const cut=(a,b,e)=>{
+    const t = e===0 ? (R_.x0-a[0])/(b[0]-a[0]) : e===1 ? (R_.x1-a[0])/(b[0]-a[0])
+            : e===2 ? (R_.y0-a[1])/(b[1]-a[1]) : (R_.y1-a[1])/(b[1]-a[1]);
+    return [a[0]+t*(b[0]-a[0]), a[1]+t*(b[1]-a[1])];
+  };
+  let out=pts;
+  for(let e=0;e<4 && out.length;e++){
+    const inp=out; out=[];
+    for(let i=0;i<inp.length;i++){
+      const cur=inp[i], prv=inp[(i+inp.length-1)%inp.length];
+      const ci=inside(cur,e), pi=inside(prv,e);
+      if(ci){ if(!pi) out.push(cut(prv,cur,e)); out.push(cur); }
+      else if(pi) out.push(cut(prv,cur,e));
+    }
+  }
+  return out;
+}
+const clipSeg = (a,b,R_) => {
+  const outside = p => p[0]<R_.x0||p[0]>R_.x1||p[1]<R_.y0||p[1]>R_.y1;
+  return outside(a) && outside(b) ? null : [a,b];
+};
+
+/* roof caps, mirroring what the exporter does */
+function roofTris(pts, z0, h, shape, dir, orient, mode){
+  if(!h || h<=0 || !shape || shape==='flat' || mode==='none') return null;
+  const isRidge = RIDGE.includes(shape), isRound = ROUND.includes(shape);
+  if(!isRidge && !isRound) return null;
+  if(isRidge && mode!=='all'){
+    if(mode!=='safe') return null;
+    if(dir==null && !orient){
+      let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+      pts.forEach(p=>{x0=Math.min(x0,p[0]);y0=Math.min(y0,p[1]);
+                      x1=Math.max(x1,p[0]);y1=Math.max(y1,p[1]);});
+      const a=Math.max(x1-x0,y1-y0), b=Math.max(Math.min(x1-x0,y1-y0),1e-6);
+      if(a/b < 1.25) return null;
+    }
+  }
+  const n=pts.length, T=[];
+  const cx=pts.reduce((s,p)=>s+p[0],0)/n, cy=pts.reduce((s,p)=>s+p[1],0)/n;
+
+  if(isRound){
+    if(shape==='pyramidal'||shape==='cone'){
+      for(let i=0;i<n;i++){ const j=(i+1)%n;
+        T.push(pts[i][0],pts[i][1],z0, pts[j][0],pts[j][1],z0, cx,cy,z0+h); }
+    } else {                                   // dome / onion: stacked rings
+      const K=5; let prev=pts.map(p=>[p[0],p[1],z0]);
+      for(let s=1;s<=K;s++){
+        const t=s/K, r=Math.cos(t*Math.PI/2), dz=Math.sin(t*Math.PI/2);
+        const ring=pts.map(p=>[cx+(p[0]-cx)*r, cy+(p[1]-cy)*r, z0+h*dz]);
+        for(let i=0;i<n;i++){ const j=(i+1)%n;
+          T.push(...prev[i],...prev[j],...ring[j]);
+          T.push(...prev[i],...ring[j],...ring[i]); }
+        prev=ring;
+      }
+    }
+    return T;
+  }
+  // ridge: axis along the longer side of the bounding box, or from roof:direction
+  let ax=[1,0];
+  let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+  pts.forEach(p=>{x0=Math.min(x0,p[0]);y0=Math.min(y0,p[1]);
+                  x1=Math.max(x1,p[0]);y1=Math.max(y1,p[1]);});
+  ax = (x1-x0) >= (y1-y0) ? [1,0] : [0,1];
+  if(orient==='across') ax=[ax[1],ax[0]];
+  if(dir!=null){ const a=dir*Math.PI/180; const sl=[Math.sin(a),Math.cos(a)];
+    ax=[sl[1],-sl[0]]; }               // ridge is perpendicular to the slope
+  const t = pts.map(p=>(p[0]-cx)*ax[0]+(p[1]-cy)*ax[1]);
+  const tmin=Math.min(...t), tmax=Math.max(...t), tmid=(tmin+tmax)/2;
+  const inset = (shape==='hipped'||shape==='half_hipped') ? 0.25*(tmax-tmin) : 0;
+  const A=[cx+ax[0]*(tmin+inset), cy+ax[1]*(tmin+inset), z0+h];
+  const B=[cx+ax[0]*(tmax-inset), cy+ax[1]*(tmax-inset), z0+h];
+  if(shape==='skillion'){
+    const nx=[-ax[1],ax[0]];
+    const d=pts.map(p=>(p[0]-cx)*nx[0]+(p[1]-cy)*nx[1]);
+    const dmin=Math.min(...d), dmax=Math.max(...d), rng=Math.max(dmax-dmin,1e-6);
+    const zz=pts.map((p,i)=>z0+h*(dmax-d[i])/rng);
+    for(let i=1;i<n-1;i++)
+      T.push(pts[0][0],pts[0][1],zz[0], pts[i][0],pts[i][1],zz[i],
+             pts[i+1][0],pts[i+1][1],zz[i+1]);
+    return T;
+  }
+  for(let i=0;i<n;i++){ const j=(i+1)%n;
+    const ki = t[i]<tmid?A:B, kj = t[j]<tmid?A:B;
+    if(ki===kj) T.push(pts[i][0],pts[i][1],z0, pts[j][0],pts[j][1],z0, ...ki);
+    else { T.push(pts[i][0],pts[i][1],z0, pts[j][0],pts[j][1],z0, ...kj);
+           T.push(pts[i][0],pts[i][1],z0, ...kj, ...ki); }
+  }
+  return T;
+}
+
+function mergeGeos(list){
+  let np=0; for(const g of list) np+=g.attributes.position.count;
+  const pos=new Float32Array(np*3), nor=new Float32Array(np*3);
+  let o=0;
+  for(const g of list){
+    if(!g.attributes.normal) g.computeVertexNormals();
+    pos.set(g.attributes.position.array,o*3); nor.set(g.attributes.normal.array,o*3);
+    o+=g.attributes.position.count; g.dispose();
+  }
+  const out=new THREE.BufferGeometry();
+  out.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  out.setAttribute('normal',new THREE.BufferAttribute(nor,3));
+  return out;
+}
+
+function classify(t){
+  if(!t) return null;
+  if(t.building) return 'buildings';
+  if(t.natural==='water'||t.waterway==='riverbank') return 'water';
+  if(t.leisure||t.landuse) return 'greenery';
+  if(t.highway) return 'roads';
+  return null;
+}
+function heightM(t){
+  const h=parseFloat(t.height||t['building:height']);
+  if(Number.isFinite(h)&&h>0) return h;
+  const lv=parseFloat(t['building:levels']);
+  if(Number.isFinite(lv)&&lv>0) return lv*3.2;
+  return 8;
+}
+
+function buildScene(els){
+  const g=glInit();
+  while(g.root.children.length){ const c=g.root.children[0];
+    if(c.geometry) c.geometry.dispose(); if(c.material) c.material.dispose();
+    g.root.remove(c); }
+
+  const v=S(), b=bboxOf(), mm=sizeMM/spanM;      // metres -> mm
+  const midLat=centre.lat*Math.PI/180;
+  const P = ll => [ (ll.lon-centre.lng)*Math.PI/180*R*Math.cos(midLat)*mm,
+                    (ll.lat-centre.lat)*Math.PI/180*R*mm ];
+  const half=sizeMM/2, CLIP={x0:-half,x1:half,y0:-half,y1:half};
+  const BASE=3, mode=$('roofs').value;
+
+  const GND = v.ff;               // the land sits on the frame floor, not the table
+
+  // frame floor, printed in the water filament: this IS the water in the real
+  // assembly, so the preview shows it as the blue base the land is glued onto
+  const ow0 = sizeMM + 2*v.fc + 2*v.fw;
+  // Only the TOP face is water; the sides and underside are the frame colour,
+  // so the plate reads as one piece with the border. BoxGeometry's material
+  // groups run [+x, -x, +y, -y, +z, -z], so index 2 is the top.
+  const dark = new THREE.MeshPhongMaterial({color: FRAME_COL,
+    flatShading:true, shininess:6, specular:0x101418});
+  const blue = new THREE.MeshPhongMaterial({color: shown('water'),
+    flatShading:true, shininess:38, specular:0x24405c});
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(ow0, v.ff, ow0),
+    [dark, dark, blue, dark, dark, dark]);
+  floor.position.y = v.ff/2; g.root.add(floor);
+
+  // Real slabs, not decals. The exporter makes these solids that sink `embed`
+  // into the terrain and stand `thickness` proud of it, so they need visible
+  // sides — a flat plane floating above the plate reads as paint.
+  const addSlab=(shapes,color,thickness,embed)=>{ if(!shapes.length) return;
+    const geo=new THREE.ExtrudeGeometry(shapes,
+      {depth:thickness+embed, bevelEnabled:false});
+    const m=new THREE.Mesh(geo, new THREE.MeshPhongMaterial({color,
+      flatShading:true, shininess:5, specular:0x14181b}));
+    m.rotation.x=-Math.PI/2;
+    m.position.y=GND+BASE-embed;      // bottom buried, top stands proud
+    g.root.add(m); };
+  const shapeOf=p=>{ const s=new THREE.Shape();
+    s.moveTo(p[0][0],p[0][1]); for(let i=1;i<p.length;i++) s.lineTo(p[i][0],p[i][1]); return s; };
+
+  const flat={greenery:[]}, roads=[], solids=[], roofTri=[], waterRings=[];
+  let nb=0, tallest=0, nroof=0;
+
+  for(const el of els){
+    const t=el.tags||{}, kind=classify(t);
+    if(!kind||!on[kind]) continue;
+    const geom=el.geometry||(el.members||[]).flatMap(m=>m.geometry||[]);
+    if(!geom||geom.length<2) continue;
+    let pts=geom.map(P);
+
+    if(kind==='roads'){
+      const w=(ROAD_W[t.highway]||8)*mm/2;
+      for(let i=0;i<pts.length-1;i++){
+        const seg=clipSeg(pts[i],pts[i+1],CLIP); if(!seg) continue;
+        const [x1,y1]=seg[0],[x2,y2]=seg[1];
+        const dx=x2-x1, dy=y2-y1, L=Math.hypot(dx,dy); if(L<1e-6) continue;
+        const nx=-dy/L*w, ny=dx/L*w;
+        const q=clipPoly([[x1+nx,y1+ny],[x2+nx,y2+ny],[x2-nx,y2-ny],[x1-nx,y1-ny]],CLIP);
+        if(q.length>2) roads.push(shapeOf(q));
+      }
+      continue;
+    }
+    if(pts.length<3) continue;
+    pts=clipPoly(pts,CLIP);
+    if(pts.length<3) continue;
+
+    if(kind==='buildings'){
+      // The exporter widens anything below the nozzle width so it prints. Do
+      // the same here or the CN Tower's 2 m mast is a 0.25 mm hairline and the
+      // tower loses the feature that makes it recognisable.
+      pts = widenToPrintable(pts, MIN_FEATURE_MM);
+      const h=heightM(t)*mm*v.bscale;
+      // A part with min_height FLOATS — the CN Tower's pod starts at 335 m.
+      // Ignoring it extruded every such part from the ground, which is why
+      // the pod came down as a column.
+      const mh0=parseFloat(t.min_height);
+      const minH=(Number.isFinite(mh0)&&mh0>0) ? Math.min(mh0*mm*v.bscale, h*0.95) : 0;
+      let rh=parseFloat(t['roof:height']);
+      const shape=t['roof:shape'];
+      if(shape && shape!=='flat'){
+        if(!Number.isFinite(rh)||rh<=0) rh=Math.min((h-minH)*0.3, 4*mm);
+        else rh*=mm;
+        const capFrac = RIDGE.includes(shape) ? v.ridge : 0.95;
+        rh=Math.min(rh, capFrac*(h-minH));
+      } else rh=0;
+      const bodyTop=h-rh, depth=Math.max(bodyTop-minH, (h-minH)*0.02, 0.05);
+      nb++; tallest=Math.max(tallest,h);
+      const geo=new THREE.ExtrudeGeometry(shapeOf(pts),{depth,bevelEnabled:false});
+      if(minH>0) geo.translate(0,0,minH);     // Z is up before the group rotates
+      solids.push(geo);
+      if(rh>0){
+        const dir=parseFloat(t['roof:direction']);
+        const tri=roofTris(pts, bodyTop, rh, shape,
+          Number.isFinite(dir)?dir:null, t['roof:orientation'], mode);
+        if(tri){ roofTri.push(...tri); nroof++; }
+      }
+    } else if(kind==='water') waterRings.push(pts);
+      else flat[kind].push(shapeOf(pts));
+  }
+
+  // the land plate is the tile MINUS the water, so the blue floor shows through
+  const plateShape = new THREE.Shape();
+  plateShape.moveTo(-half,-half); plateShape.lineTo(half,-half);
+  plateShape.lineTo(half,half);   plateShape.lineTo(-half,half);
+  // Ear-clipping fails on a hole that touches the outer ring, which is exactly
+  // what a lakefront is once it's clipped to the tile. Hold the holes a hair
+  // inside the edge so they stay valid; the exporter does the real subtraction.
+  const LIP = 0.6, inner = half - LIP;
+  let holes = 0;
+  for(const w of waterRings){
+    const ring = clipPoly(w, {x0:-inner, x1:inner, y0:-inner, y1:inner});
+    if(ring.length < 3) continue;
+    let a = 0;
+    for(let i=0;i<ring.length;i++){ const j=(i+1)%ring.length;
+      a += ring[i][0]*ring[j][1] - ring[j][0]*ring[i][1]; }
+    if(Math.abs(a/2) < 1.0) continue;              // skip slivers
+    const pth = new THREE.Path();
+    pth.moveTo(ring[0][0], ring[0][1]);
+    for(let i=1;i<ring.length;i++) pth.lineTo(ring[i][0], ring[i][1]);
+    plateShape.holes.push(pth); holes++;
+  }
+  const plate = new THREE.Mesh(
+    new THREE.ExtrudeGeometry(plateShape,{depth:BASE,bevelEnabled:false}),
+    new THREE.MeshPhongMaterial({color: shown('terrain'), side:THREE.DoubleSide,
+      flatShading:true, shininess:5, specular:0x14181b}));
+  // position.y is the BOTTOM of an extruded mesh: it already spans 0..depth
+  plate.rotation.x = -Math.PI/2; plate.position.y = GND; g.root.add(plate);
+
+  // the exporter raises these by real amounts: greenery 0.8 mm, roads 0.5 mm.
+  // Draw them at those heights so the preview shows the actual relief.
+  addSlab(roads,         shown('roads'),    LAYER_MM.roads,    LAYER_MM.embed);
+  addSlab(flat.greenery, shown('greenery'), LAYER_MM.greenery, LAYER_MM.embed);
+
+  if(roofTri.length){
+    const gr=new THREE.BufferGeometry();
+    gr.setAttribute('position',new THREE.BufferAttribute(new Float32Array(roofTri),3));
+    gr.computeVertexNormals(); solids.push(gr);
+  }
+  if(solids.length){
+    const m=new THREE.Mesh(mergeGeos(solids),
+      new THREE.MeshPhongMaterial({color:shown('buildings'),side:THREE.DoubleSide,
+      flatShading:true, shininess:14, specular:0x2a2f33}));
+    m.rotation.x=-Math.PI/2; m.position.y=GND+BASE; g.root.add(m);
+  }
+
+  // frame: always present
+  const ow=sizeMM+2*v.fc+2*v.fw, iw=sizeMM+2*v.fc;
+  const fs=new THREE.Shape();
+  fs.moveTo(-ow/2,-ow/2); fs.lineTo(ow/2,-ow/2); fs.lineTo(ow/2,ow/2); fs.lineTo(-ow/2,ow/2);
+  const hole=new THREE.Path();
+  hole.moveTo(-iw/2,-iw/2); hole.lineTo(iw/2,-iw/2); hole.lineTo(iw/2,iw/2); hole.lineTo(-iw/2,iw/2);
+  fs.holes.push(hole);
+  const fm=new THREE.Mesh(new THREE.ExtrudeGeometry(fs,{depth:v.fd,bevelEnabled:false}),
+    new THREE.MeshPhongMaterial({color:FRAME_COL, flatShading:true,
+      shininess:6, specular:0x101418}));
+  // ExtrudeGeometry already spans 0..depth, and the rotation maps that onto +Y.
+  // Setting position.y = depth (as this did) lifted the frame clear of the model.
+  fm.rotation.x=-Math.PI/2; fm.position.y=GND; g.root.add(fm);
+
+  g.cam.tgt.set(0, Math.min(tallest*0.3, 34), 0);
+  g.cam.r = sizeMM*1.9;
+  g.place(); g.render();
+
+  $('prevHud').innerHTML = `${nb.toLocaleString()} buildings<br>`
+    + `${nroof.toLocaleString()} with roof shapes${
+        nroof===0 ? ' (none in this source)' : ''}<br>`
+    + `${holes} of ${waterRings.length} water areas cut<br>`
+    + `${sizeMM} × ${sizeMM} mm<br>tallest ${tallest.toFixed(1)} mm`;
+  $('prevLegend').innerHTML = mono
+    ? `<span><i style="background:${MONO_COL}"></i>Model</span>`
+      + `<span><i style="background:${FRAME_COL}"></i>Frame</span>`
+    : FILMS.filter(f=>on[f.k]).map(f=>
+        `<span><i style="background:${col[f.k]}"></i>${f.nm}</span>`).join('');
+  $('prevHud').classList.remove('hidden'); $('prevLegend').classList.remove('hidden');
+  return nb;
+}
+
+/* --- Exact preview via the local server -----------------------------------
+   serve.py runs map2model.py itself and hands back the geometry it just wrote
+   into the 3MF. No approximation: what you orbit here is the model that will
+   print, landmark tapers and all. Only offered when the page is served by
+   serve.py rather than a plain static server.                              */
+
+let serverOK = null, exactJob = null;
+
+async function pingServer(){
+  if(serverOK !== null) return serverOK;
+  try{
+    const r = await fetch('/api/ping', {cache:'no-store'});
+    serverOK = r.ok && (await r.json()).ok === true;
+  }catch(e){ serverOK = false; }
+  return serverOK;
+}
+
+function exactParams(){
+  const b = bboxOf(), v = S();
+  return new URLSearchParams({
+    bbox: [b.w,b.s,b.e,b.n].map(n=>n.toFixed(6)).join(','),
+    size: sizeMM, zexag: v.zex, building_scale: v.bscale,
+    terrain: $('terrain').checked ? 1 : 0,
+    water: on.water?1:0, greenery: on.greenery?1:0,
+    roads: on.roads?1:0, buildings: on.buildings?1:0,
+    roofs: $('roofs').value, ridge: v.ridge,
+    lod: $('lod').value, source: $('source').value,
+    frame_width: v.fw, frame_depth: v.fd,
+    frame_clearance: v.fc, frame_floor: v.ff,
+    landmarks: 'landmarks.json'
+  }).toString();
+}
+
+function buildExactScene(layers){
+  const g = glInit();
+  while(g.root.children.length){
+    const c = g.root.children[0];
+    if(c.geometry) c.geometry.dispose();
+    // The water mesh carries an ARRAY of materials (blue top, dark sides), and
+    // an array has no .dispose — so this threw "c.material.dispose is not a
+    // function" on the SECOND preview of any tile with water in it, which is
+    // most of them. Normalise before disposing.
+    if(c.material) [].concat(c.material).forEach(m => m && m.dispose && m.dispose());
+    g.root.remove(c);
+  }
+  /* Packaging is measured, never drawn. The cover is a shell taller and wider
+     than the whole city: drawn, it hides the model; counted in the bounds, it
+     becomes `tallest` and frames the camera around a box. It still has to be in
+     `layers` because the print-volume check below measures it. */
+  const packaging = n => n.startsWith('box_') || n.startsWith('cover_');
+  const modelLayers = layers.filter(L => !packaging(L.name));
+  let x0=1e9,y0=1e9,z0=1e9,x1=-1e9,y1=-1e9,z1=-1e9;
+  for(const L of modelLayers){
+    const p=L.positions;
+    for(let i=0;i<p.length;i+=3){
+      if(p[i]<x0)x0=p[i];     if(p[i]>x1)x1=p[i];
+      if(p[i+1]<y0)y0=p[i+1]; if(p[i+1]>y1)y1=p[i+1];
+      if(p[i+2]<z0)z0=p[i+2]; if(p[i+2]>z1)z1=p[i+2];
+    }
+  }
+  const cx=(x0+x1)/2, cy=(y0+y1)/2;
+  let tris=0;
+  const tallest = z1-z0;
+  for(const L of layers){
+    if(packaging(L.name)) continue;           // measured below, never drawn
+    const colour = L.name === 'frame' ? FRAME_COL
+                 : (on.hasOwnProperty(L.name) ? shown(L.name) : shown('buildings'));
+    const src = L.positions, pos = new Float32Array(src.length);
+    for(let i=0;i<src.length;i+=3){
+      pos[i]=src[i]-cx; pos[i+1]=src[i+1]-cy; pos[i+2]=src[i+2]-z0;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+    geo.setIndex(L.indices);
+
+    let mat;
+    if(L.name === 'water'){
+      // The water object is the frame's floor: a solid slab. Only its UPWARD
+      // faces are the blue surface — the sides and underside are frame.
+      const up = [], side = [];
+      const idx = L.indices;
+      for(let t=0;t<idx.length;t+=3){
+        const a=idx[t]*3, b=idx[t+1]*3, c=idx[t+2]*3;
+        const ux=pos[b]-pos[a],   uy=pos[b+1]-pos[a+1], uz=pos[b+2]-pos[a+2];
+        const vx=pos[c]-pos[a],   vy=pos[c+1]-pos[a+1], vz=pos[c+2]-pos[a+2];
+        const nz = ux*vy - uy*vx;                 // z of the cross product
+        const len = Math.hypot(uy*vz-uz*vy, uz*vx-ux*vz, nz) || 1;
+        (nz/len > 0.85 ? up : side).push(idx[t], idx[t+1], idx[t+2]);
+      }
+      geo.setIndex(up.concat(side));
+      geo.addGroup(0, up.length, 0);
+      geo.addGroup(up.length, side.length, 1);
+      mat = [new THREE.MeshPhongMaterial({color:FIL(shown('water')), flatShading:true,
+               shininess:38, specular:0x24405c}),
+             new THREE.MeshPhongMaterial({color:FIL(FRAME_COL), flatShading:true,
+               shininess:6, specular:0x101418})];
+    } else {
+      // flat shading: the 3MF shares vertices between faces, so averaged
+      // normals round off every building corner and the model looks smeared
+      mat = new THREE.MeshPhongMaterial({color:FIL(colour), flatShading:true,
+              shininess:L.name === 'buildings' ? 14 : 5,
+              specular:L.name === 'buildings' ? 0x2a2f33 : 0x14181b});
+    }
+    geo.computeVertexNormals();
+    const m = new THREE.Mesh(geo, mat);
+    m.rotation.x = -Math.PI/2;            // the 3MF is Z-up, the scene is Y-up
+    g.root.add(m);
+    tris += L.indices.length/3;
+  }
+  g.cam.tgt.set(0, Math.min(tallest*0.3, 34), 0);
+  g.cam.r = Math.max(x1-x0, y1-y0) * 1.9;
+  g.place(); g.render();
+  const shownObjs = modelLayers.length;
+  // Police the printer envelope. The cover is the tall part, and a model that
+  // is fine on its own can push the cover past what the machine can build.
+  const BV = 250;
+  const tooBig = layers.filter(L => L.size &&
+    (Math.max(L.size[0], L.size[1]) > BV || L.size[2] > BV));
+  const cover = layers.filter(L => L.name.startsWith('cover_'));
+  const coverH = cover.length ? Math.max(...cover.map(L=>L.size ? L.size[2] : 0)) : 0;
+  if(tooBig.length){
+    const worst = tooBig[0];
+    $('sizeNote').innerHTML = `<strong>This will not print.</strong>
+      ${worst.name.replace('_',' ')} comes out
+      ${worst.size[0].toFixed(0)} × ${worst.size[1].toFixed(0)} ×
+      ${worst.size[2].toFixed(0)} mm, past the ${BV} mm the printer can build.
+      Choose a smaller print size, or lower the building stretch.`;
+    $('sizeNote').className = 'hint sizewarn';
+  } else if(coverH > BV * 0.85){
+    $('sizeNote').innerHTML = `<strong>Close to the limit.</strong> The cover is
+      ${coverH.toFixed(0)} mm tall against a ${BV} mm ceiling. Any more building
+      stretch and it will not print.`;
+    $('sizeNote').className = 'hint sizewarn';
+  }
+  $('prevHud').innerHTML = `${shownObjs} objects<br>`
+    + `${tris.toLocaleString()} triangles<br>${sizeMM} × ${sizeMM} mm<br>`
+    + `tallest ${tallest.toFixed(1)} mm`
+    + (coverH ? `<br>cover ${coverH.toFixed(0)} mm tall` : '');
+  $('prevLegend').innerHTML = mono
+    ? `<span><i style="background:${MONO_COL}"></i>Model</span>`
+      + `<span><i style="background:${FRAME_COL}"></i>Frame</span>`
+    : FILMS.filter(f=>on[f.k]).map(f=>
+        `<span><i style="background:${col[f.k]}"></i>${f.nm}</span>`).join('');
+  $('prevHud').classList.remove('hidden');
+  $('prevLegend').classList.remove('hidden');
+  return tris;
+}
+
+async function buildExact(signal){
+  const NOTE = 'This runs the real exporter, so it takes as long as an export '
+             + 'does — usually a few minutes, most of it downloading Overture '
+             + 'data. What you get back is the printed model, not an approximation.';
+  logSteps = [];
+  const gen = startClock();
+  const s0 = step('Asking the server to build the model');
+  drawLog(NOTE, true);
+
+  const j = await (await fetch('/api/start?' + exactParams())).json();
+  if(j.error) throw new Error(j.error);
+  s0.state='done'; s0.det='job ' + j.id;
+
+  const sLog = step('Running map2model.py'); drawLog(NOTE, true);
+  let last='';
+  for(;;){
+    if(signal.aborted) throw Object.assign(new Error('cancelled'),{cancelled:true});
+    await sleep(700);
+    const st = await (await fetch('/api/status?id='+j.id)).json();
+    if(!isCurrent(gen) || signal.aborted)
+      throw Object.assign(new Error('cancelled'),{cancelled:true});
+    const line = (st.lines||[]).filter(l=>l.trim() && !l.startsWith('[warn]')).pop();
+    if(line && line !== last){ last=line; sLog.det = line.slice(0,68); drawLog(NOTE, true); }
+    $('prevStatus').textContent = 'building · ' + st.elapsed + 's';
+    if(st.error) throw new Error(String(st.error).trim().split('\n').pop());
+    if(st.done) break;
+  }
+  sLog.state='done'; sLog.det='exporter finished';
+
+  const sM = step('Loading the mesh'); drawLog(NOTE, true);
+  const mesh = await (await fetch('/api/mesh?id='+j.id)).json();
+  if(mesh.error) throw new Error(mesh.error);
+  const tris = buildExactScene(mesh.layers);
+  sM.state='done'; sM.det = `${tris.toLocaleString()} triangles`;
+  stopClock(gen);
+  exactJob = j.id;
+  $('prevOverlay').classList.add('hidden');
+  $('prevWorking').classList.add('hidden');
+  $('prevStatus').textContent =
+    `${mesh.layers.length} objects · ${elapsed().toFixed(1)}s · exact`;
+}
+
+/* --- Vector tiles (fast path) ---------------------------------------------
+   Overpass runs a live database query for every request, which is why it
+   queues, rate-limits and times out on a dense tile. OpenFreeMap instead
+   serves pre-baked OpenMapTiles vector tiles as static files from a CDN:
+   no API key, no request limit, and tens of milliseconds per tile. That is
+   exactly how the comparable tools do it.
+
+   MapLibre already knows how to fetch and decode those tiles, so rather than
+   writing a Mapbox-Vector-Tile parser we point an offscreen map at the tile
+   source and read the decoded features straight out of it.               */
+
+const VT_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
+const VT_ZOOM  = 15;                    // buildings appear from z14 in this schema
+let vtMap = null, vtReady = null;
+
+function vtInit(){
+  if(vtReady) return vtReady;
+  vtReady = new Promise((resolve, reject)=>{
+    if(typeof maplibregl === 'undefined'){ reject(new Error('MapLibre unavailable')); return; }
+    vtMap = new maplibregl.Map({
+      container:'vtmap', style:VT_STYLE, center:[centre.lng, centre.lat],
+      zoom:VT_ZOOM, attributionControl:false, interactive:false, fadeDuration:0
+    });
+    vtMap.on('load', ()=>resolve(vtMap));
+    vtMap.on('error', e=>reject(new Error(e && e.error ? e.error.message : 'tile source failed')));
+    setTimeout(()=>reject(new Error('tile source timed out')), 25000);
+  });
+  return vtReady;
+}
+
+const idle = m => new Promise(res=>{
+  if(m.isStyleLoaded() && m.areTilesLoaded()) return res();
+  const done = ()=>{ m.off('idle', done); res(); };
+  m.on('idle', done);
+  setTimeout(done, 20000);
+});
+
+/* OpenMapTiles source layers -> the tag shape the rest of the code expects */
+function vtToTags(layer, p){
+  if(layer === 'building')
+    return {building:'yes', height:p.render_height, min_height:p.render_min_height,
+            'roof:shape':p.roof_shape, 'roof:height':p.roof_height};
+  if(layer === 'water') return {natural:'water'};
+  if(layer === 'landcover' || layer === 'landuse' || layer === 'park'){
+    // OpenMapTiles' landuse layer includes residential, commercial and
+    // industrial districts, which blanket whole neighbourhoods. Only the
+    // genuinely green classes belong on the greenery filament.
+    const c = p.class || p.subclass || '';
+    const GREEN = ['wood','forest','grass','grassland','meadow','park','garden',
+                   'scrub','heath','cemetery','pitch','playground','golf_course',
+                   'recreation_ground','allotments','village_green','wetland',
+                   'nature_reserve','protected_area'];
+    if(layer === 'park' || GREEN.includes(c)) return {landuse: c || 'park'};
+    return null;
+  }
+  if(layer === 'transportation') return {highway:p.class};
+  return null;
+}
+
+function ringsOf(geom){
+  if(!geom) return [];
+  if(geom.type === 'Polygon')       return [geom.coordinates[0]];
+  if(geom.type === 'MultiPolygon')  return geom.coordinates.map(c=>c[0]);
+  if(geom.type === 'LineString')    return [geom.coordinates];
+  if(geom.type === 'MultiLineString') return geom.coordinates;
+  return [];
+}
+
+async function fetchVectorTiles(onStatus, signal){
+  const m = await vtInit();
+  if(signal && signal.aborted) throw Object.assign(new Error('cancelled'),{cancelled:true});
+  const b = bboxOf();
+  onStatus('loading tiles');
+  m.fitBounds([[b.w,b.s],[b.e,b.n]], {padding:0, animate:false, maxZoom:VT_ZOOM});
+  await idle(m);
+  if(signal && signal.aborted) throw Object.assign(new Error('cancelled'),{cancelled:true});
+
+  const WANT = {buildings:'building', water:'water', roads:'transportation'};
+  const out = [], seen = new Set();
+  const push = (kind, srcLayer)=>{
+    let feats = [];
+    try{ feats = m.querySourceFeatures('openmaptiles', {sourceLayer:srcLayer}); }
+    catch(e){ return 0; }
+    let n = 0;
+    for(const f of feats){
+      const key = srcLayer + ':' + (f.id !== undefined ? f.id : JSON.stringify(f.geometry).length
+                  + ':' + JSON.stringify(f.geometry).slice(0,60));
+      if(seen.has(key)) continue;        // the same feature appears in every tile it spans
+      seen.add(key);
+      const tags = vtToTags(srcLayer, f.properties || {});
+      if(!tags) continue;
+      for(const ring of ringsOf(f.geometry)){
+        if(ring.length < 2) continue;
+        out.push({tags, geometry: ring.map(c=>({lon:c[0], lat:c[1]}))});
+        n++;
+      }
+    }
+    return n;
+  };
+  const counts = {};
+  for(const [kind, src] of Object.entries(WANT)){
+    if(!on[kind]) continue;
+    onStatus('reading ' + kind);
+    counts[kind] = push(kind, src);
+  }
+  if(on.greenery){
+    onStatus('reading greenery');
+    counts.greenery = push('greenery','landcover') + push('greenery','landuse')
+                    + push('greenery','park');
+  }
+  return {elements:out, counts};
+}
+
+/* --- Exact mode: open the exported 3MF ------------------------------------
+   The preview approximates; the .py does not. So let the console open the
+   file the exporter wrote and render THAT — the same vertices the slicer
+   gets, including landmark tapers and Overture roofs the preview cannot
+   reconstruct from web data. No server needed: the model is already on disk
+   next to this page.                                                       */
+
+let exactCache = null;
+let DISCLAIMER_HTML = '';   // captured at startup so exact mode can restore it
+
+async function load3MF(files){
+  const objs = [];
+  for(const f of files){
+    const zip = await JSZip.loadAsync(f);
+    let entry = zip.file('3D/3dmodel.model');
+    if(!entry){
+      const cand = zip.file(/3dmodel\.model$/);
+      entry = cand && cand.length ? cand[0] : null;
+    }
+    if(!entry) throw new Error(`${f.name} has no 3D/3dmodel.model inside`);
+    const xml = await entry.async('string');
+    const ore = /<object[^>]*?name="([^"]+)"[^>]*?>([\s\S]*?)<\/object>/g;
+    let m;
+    while((m = ore.exec(xml))){
+      const name = m[1], seg = m[2], V = [], F = [];
+      const vre = /<vertex x="([-\d.eE+]+)" y="([-\d.eE+]+)" z="([-\d.eE+]+)"/g;
+      let v; while((v = vre.exec(seg))) V.push(+v[1], +v[2], +v[3]);
+      const tre = /<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"/g;
+      let t; while((t = tre.exec(seg))) F.push(+t[1], +t[2], +t[3]);
+      if(V.length && F.length) objs.push({name, V, F});
+    }
+  }
+  if(!objs.length) throw new Error('No mesh objects found in the file');
+  return objs;
+}
+
+function renderExact(objs, label){
+  const g = glInit();
+  while(g.root.children.length){ const c = g.root.children[0];
+    if(c.geometry) c.geometry.dispose();
+    if(c.material){ (Array.isArray(c.material)?c.material:[c.material]).forEach(x=>x.dispose()); }
+    g.root.remove(c); }
+
+  let top = 0, span = 1, nv = 0, nt = 0;
+  const counts = [];
+  for(const o of objs){
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(o.V), 3));
+    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(o.F), 1));
+    geo.computeVertexNormals();
+    const key = (o.name || '').toLowerCase();
+    const colr = key === 'frame' ? FRAME_COL
+               : col[key] !== undefined ? shown(key) : '#C9CDD2';
+    const mesh = new THREE.Mesh(geo,
+      new THREE.MeshPhongMaterial({color: colr, side: THREE.DoubleSide,
+        flatShading:true, shininess:10, specular:0x1c2126}));
+    mesh.rotation.x = -Math.PI/2;              // 3MF is Z-up
+    g.root.add(mesh);
+    nv += o.V.length/3; nt += o.F.length/3;
+    counts.push(`${o.name} ${(o.F.length/3).toLocaleString()}`);
+    for(let i = 2; i < o.V.length; i += 3) if(o.V[i] > top) top = o.V[i];
+    for(let i = 0; i < o.V.length; i += 3){
+      const a = Math.abs(o.V[i]), b = Math.abs(o.V[i+1]);
+      if(a > span) span = a; if(b > span) span = b;
+    }
+  }
+  g.cam.tgt.set(0, Math.min(top*0.3, 40), 0);
+  g.cam.r = span * 3.2;
+  g.place(); g.render();
+
+  exactCache = {objs, label};
+  cache = null; cacheKey = '';
+  $('prevHud').innerHTML = `${label}<br>${nv.toLocaleString()} vertices · `
+    + `${nt.toLocaleString()} triangles<br>${counts.join('<br>')}`;
+  $('prevHud').classList.remove('hidden');
+  $('prevLegend').innerHTML = objs.map(o=>{
+    const k = (o.name||'').toLowerCase();
+    const c = k === 'frame' ? FRAME_COL : col[k] !== undefined ? shown(k) : '#C9CDD2';
+    return `<span><i style="background:${c}"></i>${o.name}</span>`;
+  }).join('');
+  $('prevLegend').classList.remove('hidden');
+  $('prevWorking').classList.add('hidden');
+  $('prevOverlay').classList.add('hidden');
+  $('prevDisclaimer').classList.add('exact');
+  $('prevDisclaimer').innerHTML = '<strong>Exact model.</strong> This is the exported '
+    + '3MF itself — the same vertices the slicer receives, tapers and roofs included.';
+  $('prevStatus').textContent = `exact · ${label}`;
+}
+
+async function openExact(fileList){
+  const files = Array.from(fileList || []);
+  if(!files.length) return;
+  $('prevOverlay').classList.remove('hidden');
+  $('prevOverlay').innerHTML = '<div class="spin"></div><p>Reading '
+    + files.map(f=>f.name).join(', ') + '…</p>';
+  try{
+    const objs = await load3MF(files);
+    renderExact(objs, files.map(f=>f.name).join(' + '));
+  }catch(e){
+    $('prevOverlay').innerHTML = `<p>${e.message}</p>
+      <button id="btnBuild">Build preview instead</button>`;
+    $('btnBuild').addEventListener('click', buildPreview);
+  }
+}
+
+/* --- Detail overlay --------------------------------------------------------
+   Vector tiles give every building, but the OpenMapTiles schema carries no
+   roof shapes and no building parts — so domes render flat and towers come
+   out as prisms. Those attributes only exist on a small minority of
+   buildings, so asking Overpass for JUST those is a couple of seconds rather
+   than the minutes a full building query takes.
+
+   Simple 3D Buildings says parts replace their parent volume, so anything
+   returned here supersedes the plain prism it sits inside.               */
+
+function detailQL(b){
+  return `[out:json][timeout:40];(`
+       + `way["building"]["roof:shape"](${b});`
+       + `way["building:part"](${b});`
+       + `relation["building:part"](${b});`
+       + `);out geom qt;`;
+}
+
+/* Quadrants, each on its own mirror, all in flight together. One query over a
+   dense downtown returned 1,219 parts and took over two minutes; four smaller
+   ones make the wall time the slowest quadrant rather than the sum. */
+function detailQuads(){
+  const b = bboxOf();
+  const mx = (b.w + b.e)/2, my = (b.s + b.n)/2;
+  return [
+    `${my},${b.w},${b.n},${mx}`,   // NW
+    `${my},${mx},${b.n},${b.e}`,   // NE
+    `${b.s},${b.w},${my},${mx}`,   // SW
+    `${b.s},${mx},${my},${b.e}`,   // SE
+  ];
+}
+
+async function fetchDetail(onStatus, signal){
+  const quads = detailQuads();
+  let done = 0;
+  const results = await Promise.allSettled(quads.map((q, i)=>
+    askOverpass(detailQL(q), host=>onStatus(`quadrant ${i+1}/4 · ${host.split('.')[0]}`),
+      signal, i)                          // i -> each quadrant starts on its own mirror
+      .then(r=>{ onStatus(`${++done}/4 quadrants in`); return r; })
+  ));
+  if(results.every(r=>r.status === 'rejected')) throw results[0].reason;
+  const els = results.filter(r=>r.status==='fulfilled').flatMap(r=>r.value);
+  const out = [], seenIds = new Set();
+  for(const el of els){
+    const uid = el.type + '/' + el.id;
+    if(seenIds.has(uid)) continue;        // ways on a quadrant edge return twice
+    seenIds.add(uid);
+    const t = el.tags || {};
+    const tags = {building:'yes', height:t.height, min_height:t.min_height,
+      'building:levels':t['building:levels'], 'roof:shape':t['roof:shape'],
+      'roof:height':t['roof:height'], 'roof:direction':t['roof:direction'],
+      'roof:orientation':t['roof:orientation']};
+    // A relation's members are SEPARATE rings. Concatenating them stitches
+    // distant outlines into one garbage polygon, so emit each outer ring.
+    const rings = el.geometry
+      ? [el.geometry]
+      : (el.members||[]).filter(m=>m.role !== 'inner' && m.geometry)
+                        .map(m=>m.geometry);
+    for(const r of rings){
+      if(!r || r.length < 3) continue;
+      out.push({tags, geometry: r.map(g=>({lat:g.lat, lon:g.lon}))});
+    }
+  }
+  return out;
+}
+
+const bboxOfRing = r => {
+  let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+  for(const p of r){ if(p.lon<x0)x0=p.lon; if(p.lon>x1)x1=p.lon;
+                     if(p.lat<y0)y0=p.lat; if(p.lat>y1)y1=p.lat; }
+  return {x0,y0,x1,y1};
+};
+function inRing(lon, lat, r){
+  let hit=false;
+  for(let i=0,j=r.length-1;i<r.length;j=i++){
+    const xi=r[i].lon, yi=r[i].lat, xj=r[j].lon, yj=r[j].lat;
+    if((yi>lat)!==(yj>lat) && lon < (xj-xi)*(lat-yi)/(yj-yi)+xi) hit=!hit;
+  }
+  return hit;
+}
+
+/* Drop any tile-derived building that a detail feature replaces. */
+function mergeDetail(vt, detail){
+  if(!detail.length) return vt;
+  const boxes = detail.map(d=>({b:bboxOfRing(d.geometry), r:d.geometry}));
+  const kept = [];
+  let dropped = 0;
+  for(const f of vt){
+    if(!f.tags || !f.tags.building){ kept.push(f); continue; }
+    let cx=0, cy=0;
+    for(const p of f.geometry){ cx+=p.lon; cy+=p.lat; }
+    cx/=f.geometry.length; cy/=f.geometry.length;
+    let covered = false;
+    for(const d of boxes){
+      if(cx < d.b.x0 || cx > d.b.x1 || cy < d.b.y0 || cy > d.b.y1) continue;
+      if(inRing(cx, cy, d.r)){ covered = true; break; }
+    }
+    if(covered) dropped++; else kept.push(f);
+  }
+  mergeDetail.dropped = dropped;
+  return kept.concat(detail);
+}
+
+/* --- Overpass, one request per layer --- */
+const MIRRORS=['https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.osm.jp/api/interpreter'];
+/* Two queries per layer: the full one, and a lighter fallback for when a
+   mirror is too busy to finish the first. Residential streets and generic
+   landcover are the bulk of the payload, so dropping them usually turns a
+   timeout into a result rather than an empty layer.                        */
+const LAYER_QL={
+  buildings:b=>`way["building"](${b});relation["building"](${b});`,
+  water:    b=>`way["natural"="water"](${b});relation["natural"="water"](${b});`
+              +`way["waterway"="riverbank"](${b});`,
+  greenery: b=>`way["leisure"~"^(park|garden|golf_course)$"](${b});`
+              +`way["landuse"~"^(grass|forest|meadow|cemetery|recreation_ground)$"](${b});`,
+  roads:    b=>`way["highway"~"^(motorway|trunk|primary|secondary|tertiary|`
+              +`residential|living_street|unclassified|pedestrian)$"](${b});`
+};
+const LAYER_LITE={
+  greenery: b=>`way["leisure"="park"](${b});way["landuse"="forest"](${b});`,
+  roads:    b=>`way["highway"~"^(motorway|trunk|primary|secondary|tertiary)$"](${b});`
+};
+let abortAll = null;    // lets Cancel, and a new build, stop the old one
+const sleep = ms => new Promise(r=>setTimeout(r, ms));
+
+/* Overpass allows roughly two slots per IP and answers a third with 429.
+   Two rules keep the layers from sabotaging each other:
+     · each layer STARTS on a different mirror, so concurrent requests never
+       queue against the same host
+     · a 429 or 504 is transient, so back off and try again instead of
+       striking that mirror off for the rest of the build (which is what made
+       later layers fail while earlier ones succeeded)                       */
+async function askOverpass(body, onTry, signal, offset){
+  const PASSES = 2;
+  let lastErr = null, netFails = 0, attempts = 0;
+  for(let pass = 0; pass < PASSES; pass++){
+    for(let k = 0; k < MIRRORS.length; k++){
+      if(signal && signal.aborted)
+        throw Object.assign(new Error('cancelled'), {cancelled:true});
+      const i = (offset + k) % MIRRORS.length;
+      const host = new URL(MIRRORS[i]).host;
+      attempts++;
+      if(onTry) onTry(host, pass > 0);
+      try{
+        const ctl = new AbortController();
+        const timer = setTimeout(()=>ctl.abort(), 30000);
+        if(signal) signal.addEventListener('abort', ()=>ctl.abort(), {once:true});
+        const r = await fetch(MIRRORS[i] + '?data=' + encodeURIComponent(body),
+          {method:'GET', signal:ctl.signal});
+        clearTimeout(timer);
+        if(r.ok) return (await r.json()).elements || [];
+        lastErr = new Error(r.status === 429 || r.status === 504
+          ? `every mirror was busy (${r.status})` : `mirror returned ${r.status}`);
+        if(r.status === 429) await sleep(1200);   // let the slot free up
+      }catch(e){
+        if(signal && signal.aborted)
+          throw Object.assign(new Error('cancelled'), {cancelled:true});
+        netFails++;
+        lastErr = e.name === 'AbortError' ? new Error('every mirror timed out') : e;
+      }
+    }
+    if(pass < PASSES - 1) await sleep(1500);      // breathe before the next pass
+  }
+  const err = lastErr || new Error('No Overpass mirror responded');
+  if(netFails === attempts) err.blocked = true;
+  throw err;
+}
+
+async function fetchLayer(kind, onStatus, signal, offset){
+  const b0 = bboxOf(), b = `${b0.s},${b0.w},${b0.n},${b0.e}`;
+  try{
+    return await askOverpass(`[out:json][timeout:50];(${LAYER_QL[kind](b)});out geom qt;`,
+      (host, retry) => onStatus(kind, host, retry ? 'retrying' : ''), signal, offset);
+  }catch(e){
+    if(e.cancelled || e.blocked || !LAYER_LITE[kind]) throw e;
+    // still no luck: ask for the essentials only rather than give up on the layer
+    const res = await askOverpass(
+      `[out:json][timeout:40];(${LAYER_LITE[kind](b)});out geom qt;`,
+      host => onStatus(kind, host, 'main roads only'), signal, offset + 1);
+    res.lite = true;
+    return res;
+  }
+}
+
+/* Run a few jobs at once. Overpass gives an IP about two slots, so two is the
+   sweet spot: four at once just queues, one at a time wastes the wait.       */
+async function pool(items, limit, worker){
+  const it = items[Symbol.iterator]();
+  const runners = Array.from({length: Math.min(limit, items.length)}, async ()=>{
+    for(;;){
+      const nx = it.next();
+      if(nx.done) return;
+      await worker(nx.value);
+    }
+  });
+  await Promise.all(runners);
+}
+
+/* The preview leans on a free shared service, so narrate every step rather
+   than showing an opaque spinner.                                          */
+let logSteps = [];
+
+function drawLog(note, cancellable){
+  const icon = s => s.state==='done' ? '✓' : s.state==='fail' ? '×'
+                  : s.state==='now' ? '▸' : '·';
+  $('prevOverlay').innerHTML =
+    `<div class="buildlog">${logSteps.map(s=>
+      `<div class="step ${s.state}"><span class="mark">${icon(s)}</span>
+       <span>${s.label}</span><span class="det">${s.det||''}</span></div>`).join('')}
+      <div class="elapsed-row"><span>elapsed</span><span id="elapsed">${
+        elapsed().toFixed(1)}s</span></div>
+      ${note ? `<div class="note">${note}</div>` : ''}</div>`
+    + (cancellable ? '<button id="btnCancel">Cancel</button>' : '');
+  if(cancellable) $('btnCancel').addEventListener('click', ()=>{
+    if(abortAll) abortAll.abort();
+    stopClock();                       // a user cancel really does stop the clock
+    $('prevStatus').textContent = 'cancelled';
+  });
+}
+
+function step(label){ const s={label, state:'now', det:''}; logSteps.push(s); return s; }
+
+/* A build that is cancelled only notices at its next `await`, so the previous
+   run lives on for up to a poll interval AFTER the new one has started. Without
+   a generation token its cleanup lands on the new run: its stopClock() killed
+   the new interval and its status write replaced the new build's status, so the
+   panel showed a frozen or stale time. Every write is now stamped. */
+let clockT0 = 0, clockTimer = null, clockGen = 0;
+const elapsed = () => ((performance.now() - clockT0)/1000);
+function startClock(){
+  clearInterval(clockTimer);
+  clockT0 = performance.now();
+  const gen = ++clockGen;
+  clockTimer = setInterval(()=>{
+    if(gen !== clockGen) return;                  // a stale run's interval
+    const el = document.getElementById('elapsed');
+    if(el) el.textContent = elapsed().toFixed(1) + 's';
+  }, 100);
+  return gen;
+}
+function stopClock(gen){
+  if(gen !== undefined && gen !== clockGen) return;   // stale run finishing
+  clearInterval(clockTimer); clockTimer = null;
+}
+const isCurrent = gen => gen === undefined || gen === clockGen;
+
+async function buildPreview(){
+  if(abortAll) abortAll.abort();
+  abortAll = new AbortController();
+  const signal = abortAll.signal;
+
+  // The preview IS the exporter. If the server isn't there, say so plainly
+  // rather than quietly showing something that isn't the printed model.
+  $('prevOverlay').classList.remove('hidden');
+  if(!(await pingServer())){
+    logSteps = [{label:'Looking for the preview server', state:'fail',
+                 det:'not running'}];
+    drawLog('Start it with <code>python serve.py</code> in this folder, then '
+          + 'open <code>localhost:8000/map2model-console.html</code>. The '
+          + 'preview builds the real model, so it needs the exporter behind it.');
+    $('prevOverlay').innerHTML += '<button id="btnBuild">Try again</button>';
+    $('btnBuild').addEventListener('click', buildPreview);
+    $('prevStatus').textContent = 'no server';
+    return;
+  }
+  try{
+    await buildExact(signal);
+    cache = null; cacheKey = '';
+    return;
+  }catch(e){
+    // A cancelled run is the PREVIOUS build unwinding. It must leave the panel
+    // alone: the new build already owns the overlay, the clock and the status.
+    if(e.cancelled || signal.aborted) return;
+    stopClock();
+    logSteps.push({label:'Build failed', state:'fail', det:''});
+    drawLog('<strong>' + String(e.message).slice(0,300) + '</strong>');
+    $('prevOverlay').innerHTML += '<button id="btnBuild">Try again</button>';
+    $('btnBuild').addEventListener('click', buildPreview);
+    $('prevStatus').textContent = 'failed';
+    return;
+  }
+
+  const km2 = (spanM/1000)**2;
+  const wanted = ['buildings','water','greenery','roads'].filter(k=>on[k]);
+  $('prevOverlay').classList.remove('hidden');
+  logSteps = [];
+
+  const NOTE = 'This can take a good while — usually 20–60 seconds, sometimes '
+             + 'several minutes. Overpass is OpenStreetMap\'s free public query '
+             + 'service and it queues when busy. None of this affects the exported '
+             + 'model, which uses a different source and is much faster.';
+
+  const finish = msg => {
+    stopClock();
+    $('prevOverlay').innerHTML =
+      `<div class="buildlog">${logSteps.map(s=>
+        `<div class="step ${s.state}"><span class="mark">${
+          s.state==='done'?'✓':s.state==='fail'?'×':s.state==='now'?'▸':'·'}</span>
+         <span>${s.label}</span><span class="det">${s.det||''}</span></div>`).join('')}
+        <div class="note">${msg}</div></div>
+       <button id="btnBuild">Try again</button>`;
+    $('btnBuild').addEventListener('click', buildPreview);
+  };
+
+  startClock();
+  const s0 = step(`Checking the tile — ${km2.toFixed(1)} km²`);
+  drawLog(NOTE);                       // paint before the first await
+  if(!wanted.length){ s0.state='fail';
+    finish('Every layer is switched off. Turn one on to preview it.');
+    $('prevStatus').textContent=''; return; }
+  if(km2 > 8){ s0.state='fail'; s0.det='too large';
+    finish(`Overpass times out on dense tiles much above 8 km². Narrow the tile
+      width slider. The exported model has no such limit.`);
+    $('prevStatus').textContent='tile too large'; return; }
+  s0.state='done'; s0.det='ok';
+
+  // Fast path: pre-baked vector tiles. Falls back to Overpass if the tile
+  // source is unreachable.
+  const sv = step('Reading vector tiles (OpenFreeMap)');
+  drawLog(NOTE, true);
+  const sdet = on.buildings ? step('Fetching roofs and building parts') : null;
+  drawLog(NOTE, true);
+  try{
+    // Start both, but DON'T wait on the slow one. Tiles paint the city in about
+    // a second; the detail query can take a minute in a dense downtown, so it
+    // refines the scene in the background rather than holding up first paint.
+    const detP = sdet
+      ? fetchDetail(msg=>{
+          sdet.det = msg; drawLog(NOTE, true);
+          const w = document.getElementById('prevWorkingText');
+          if(w) w.textContent = 'Roofs and building parts — ' + msg;
+        }, signal)
+      : Promise.resolve([]);
+    detP.catch(()=>{});                       // handled below; don't warn unhandled
+
+    const vt = await fetchVectorTiles(msg=>{ sv.det = msg; drawLog(NOTE, true); }, signal);
+
+    if(vt.elements.length){
+      sv.state='done';
+      sv.det = Object.entries(vt.counts).map(([k,n])=>`${k} ${n}`).join(' · ');
+      const sd = step('Clipping and extruding'); drawLog(NOTE, true);
+      await new Promise(r=>setTimeout(r,16));
+      const nbv = buildScene(vt.elements);
+      sd.state='done'; sd.det = `${nbv.toLocaleString()} buildings`;
+      const firstPaint = elapsed().toFixed(1);
+      exactCache = null;
+  $('prevDisclaimer').classList.remove('exact');
+  $('prevDisclaimer').innerHTML = DISCLAIMER_HTML;
+  cacheKey = JSON.stringify([centre,spanM]); cache = vt.elements;
+      cachedLayers = new Set(['buildings','water','greenery','roads']);
+      $('prevOverlay').classList.add('hidden');
+      $('prevStatus').textContent =
+        `${nbv} buildings · ${firstPaint}s · tiles` + (sdet ? ' · detail loading…' : '');
+      if(sdet){
+        $('prevWorking').classList.remove('hidden');
+        $('prevWorkingText').textContent = 'Loading roofs and building parts…';
+      }
+
+      const myKey = cacheKey;
+      detP.then(detail=>{
+        // ignore if the tile moved or another build started while we waited
+        if(signal.aborted || cacheKey !== myKey) return;
+        $('prevWorking').classList.add('hidden');
+        if(!detail.length){
+          $('prevStatus').textContent = `${nbv} buildings · ${firstPaint}s · tiles`;
+          return;
+        }
+        const merged = mergeDetail(vt.elements, detail);
+        const nb2 = buildScene(merged);
+        cache = merged;
+        stopClock();
+        $('prevStatus').textContent = `${nb2} buildings · ${firstPaint}s`
+          + ` · +${detail.length} detailed at ${elapsed().toFixed(0)}s`;
+      }).catch(()=>{
+        if(signal.aborted || cacheKey !== myKey) return;
+        $('prevWorking').classList.add('hidden');
+        stopClock();
+        $('prevStatus').textContent = `${nbv} buildings · ${firstPaint}s · tiles (no detail)`;
+      });
+      return;
+    }
+    sv.state='fail'; sv.det='no features here';
+  }catch(e){
+    if(e.cancelled){ stopClock(); $('prevStatus').textContent='cancelled'; return; }
+    sv.state='fail'; sv.det = 'falling back to Overpass';
+  }
+  drawLog(NOTE, true);
+
+  const steps = {};
+  wanted.forEach(k=>{ steps[k] = step(`Downloading ${k}`); steps[k].state='pend'; });
+  const sb = step('Clipping to the tile and extruding'); sb.state='pend';
+  drawLog(NOTE, true);
+
+  const got=[], failed=[];
+  let blocked=false, lastMsg='', cancelled=false;
+  const t0 = performance.now();
+
+  let started = 0;
+  await pool(wanted, 2, async kind => {
+    if(signal.aborted || blocked) { steps[kind].state='pend'; steps[kind].det='skipped'; return; }
+    const offset = wanted.indexOf(kind);      // each layer starts on its own mirror
+    if(started++) await sleep(400);           // don't fire both at the same instant
+    const s = steps[kind]; s.state='now'; drawLog(NOTE, true);
+    const tk = performance.now();
+    try{
+      const els = await fetchLayer(kind, (k,host,note)=>{
+        s.det = host.split('.')[0] + (note ? ' · ' + note : '');
+        drawLog(NOTE, true);
+        $('prevStatus').textContent = `${k} · ${host.split('.')[0]}`;
+      }, signal, offset);
+      got.push(...els);
+      s.state='done';
+      s.det = `${els.length.toLocaleString()} features${els.lite?' (main only)':''}`
+            + ` · ${((performance.now()-tk)/1000).toFixed(1)}s`;
+    }catch(e){
+      if(e.cancelled){ cancelled=true; s.state='pend'; s.det='cancelled'; return; }
+      s.state='fail'; s.det = e.blocked ? 'unreachable' : 'unavailable';
+      failed.push(kind); lastMsg = e.message;
+      // every mirror refused at the network layer: stop, don't burn minutes
+      // repeating the same failure for each remaining layer
+      if(e.blocked) blocked = true;
+    }
+    drawLog(NOTE, true);
+  });
+
+  if(cancelled){ stopClock(); $('prevStatus').textContent='cancelled'; return; }
+
+  if(!got.length){
+    const local = location.protocol === 'file:';
+    finish(blocked
+      ? (local ? `No Overpass mirror could be reached. This page is open straight from
+          disk, which blocks network requests in some browsers — run
+          <code>python -m http.server</code> in this folder and open
+          <code>localhost:8000</code>. An ad blocker can also cause it.`
+        : `No Overpass mirror could be reached. Check your connection, or pause any
+           ad blocker for this page.`)
+      : `${lastMsg}. Every mirror was busy — waiting a minute, or narrowing the tile,
+         usually clears it.`);
+    $('prevStatus').textContent='failed'; return;
+  }
+
+  sb.state='now'; drawLog(NOTE, true);
+  $('prevStatus').textContent='drawing';
+  await new Promise(r=>setTimeout(r,16));
+  const nb = buildScene(got);
+  sb.state='done'; sb.det = `${nb.toLocaleString()} buildings`;
+
+  stopClock();
+  const total = elapsed().toFixed(1);
+  cacheKey = JSON.stringify([centre,spanM]); cache = got;
+  cachedLayers = new Set(wanted.filter(k=>!failed.includes(k)));
+  $('prevOverlay').classList.add('hidden');
+  $('prevStatus').textContent = failed.length
+    ? `${nb} buildings · ${failed.join(', ')} unavailable · ${total}s`
+    : `${nb} buildings · ${total}s`;
+}
+$('btnBuild').addEventListener('click',buildPreview);
+$('btnRefresh').addEventListener('click',buildPreview);
+
+/* Any settings change invalidates the preview. Changes that only affect how
+   the cached data is drawn are re-rendered on the spot; changes that alter
+   which data is needed drop back to the build prompt, so the tab can never
+   show a model that disagrees with the panel.                              */
+let cachedLayers = new Set();
+
+function previewStale(reason){
+  cache = null; cacheKey = ''; cachedLayers = new Set();
+  if(three){
+    while(three.root.children.length){
+      const c = three.root.children[0];
+      if(c.geometry) c.geometry.dispose();
+      if(c.material) c.material.dispose();
+      three.root.remove(c);
+    }
+    three.render();
+  }
+  $('prevHud').classList.add('hidden');
+  $('prevLegend').classList.add('hidden');
+  $('prevWorking').classList.add('hidden');
+  $('prevOverlay').classList.remove('hidden');
+  $('prevOverlay').innerHTML =
+    `<p>${reason}<br><br><small>Fetching can take a good while — usually under a
+      minute, occasionally several.</small></p>
+     <button id="btnBuild">Build preview</button>`;
+  $('btnBuild').addEventListener('click', buildPreview);
+  $('prevStatus').textContent = 'needs rebuilding';
+}
+
+function repaint(){
+  if(exactCache && !cache){
+    if(!$('panePrev').classList.contains('hidden'))
+      renderExact(exactCache.objs, exactCache.label);
+    return;
+  }
+  const fresh = cache && cacheKey === JSON.stringify([centre, spanM]);
+  if(!fresh) return;
+  // a layer switched on that was never downloaded needs new data, not a redraw
+  const missing = ['buildings','water','greenery','roads']
+    .filter(k => on[k] && !cachedLayers.has(k));
+  if(missing.length){
+    previewStale(`${missing.join(' and ')} ${missing.length>1?'were':'was'} not in the
+      last download. Build again to include ${missing.length>1?'them':'it'}.`);
+    return;
+  }
+  if(!$('panePrev').classList.contains('hidden')) buildScene(cache);
+}
+function showTab(prev){
+  $('tabMap').classList.toggle('on',!prev);
+  $('tabPrev').classList.toggle('on',prev);
+  $('btnRefresh').classList.toggle('hidden',!prev);
+  $('btnLoad3mf').classList.toggle('hidden',!prev);
+  $('paneMap').classList.toggle('hidden',prev);
+  $('panePrev').classList.toggle('hidden',!prev);
+  if(prev){
+    if(cache && cacheKey===JSON.stringify([centre,spanM])){
+      buildScene(cache); $('prevOverlay').classList.add('hidden');
+    } else if(three) three.render();
+  } else setTimeout(()=>map.invalidateSize(),40);
+}
+$('btnLoad3mf').addEventListener('click', ()=>$('file3mf').click());
+$('file3mf').addEventListener('change', e=>{ openExact(e.target.files); e.target.value=''; });
+$('tabMap').addEventListener('click',()=>showTab(false));
+$('tabPrev').addEventListener('click',()=>showTab(true));
+
+document.querySelectorAll('input,select').forEach(el=>{
+  el.addEventListener('input',sync); el.addEventListener('change',sync);
+  el.addEventListener('change',repaint);
+});
+
+DISCLAIMER_HTML = $('prevDisclaimer').innerHTML;
+drawFilms();
+pingServer();
+placeRect(true);
+setTimeout(()=>map.invalidateSize(),120);
+if(location.protocol==='file:'){
+  $('prevMsg').innerHTML='Build a preview from live OpenStreetMap data for this tile. '
+    +'Drag to orbit, scroll to zoom.<br><br><small>This page is open straight from disk, '
+    +'which blocks network requests in some browsers. If it fails, run '
+    +'<code>python3 -m http.server</code> in this folder and open '
+    +'<code>localhost:8000</code>.</small>';
+}
+</script>
+</body>
+</html>
