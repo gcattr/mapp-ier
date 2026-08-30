@@ -693,15 +693,35 @@ something instead of asserting against itself.
   ever committed. `landmarks.json` is tracked now. `test_offline.py` was not so
   lucky. Anything that is source and not output belongs in git the day it is
   written.
-- **A preview is slow enough to look broken.** One 1.6 km London tile measured
-  11m15s end to end: 4m10s fetching buildings and 4m17s fetching roads, against
-  ~15s of actual meshing. The console's copy promises "usually a few minutes".
-  Almost all of it is Overture round-trips over S3, and it is the main reason
-  the preview "doesn't work" anywhere unfamiliar — people give up, or a
-  transient S3/DNS failure lands inside that window. Worth a look: caching
+- **A preview is still slow, just no longer additive.** The six Overture scans
+  now run at once (see **Fetching**), so a build costs the slowest query rather
+  than the sum — a 1.6 km London tile was 11m15s end to end, of which 4m10s was
+  buildings and 4m17s was roads. That is the big win taken; what is left is the
+  single slowest scan, and it is still minutes. Not yet tried: caching
   `available_columns` across runs, narrowing the released columns, or a local
-  parquet mirror.
+  parquet mirror. **Measured before the change, not after** — nobody has timed
+  a real tile since the layers went parallel.
+- **Stair-stepping on steep ground** is the DEM's own quantisation, not the
+  mesh grid. `terrain_zoom_for()` picks a finer zoom for small tiles, which
+  reduces it; terrarium has nothing past z15, so removing it entirely would
+  mean smoothing the heightmap and trading away real relief. Deliberately not
+  done — the trade is a judgement call, not a bug fix.
+- **The Bambu project template is version-coupled.** `bambu_p1s_0.4.json` was
+  written by Bambu Studio 02.05.00.66. If Bambu changes its settings schema the
+  config may stop being accepted, and the failure is silent in the file — the
+  plate just reverts to one filament. `verify_bambu.py` is what catches it;
+  run it after a Bambu update. The regeneration command is in **Bambu Studio
+  project metadata**.
 - Cover seam and print orientation, above.
+- **The 560 px phone layout has never been seen on a phone.** The rules were
+  confirmed to parse by reading the stylesheet back out of a browser, but the
+  window would not resize on the development display, so nothing was rendered
+  at that width. Worth ten seconds on a real handset.
+- **`--floating-parts` has only been exercised on synthetic shapes.** The rule
+  is unit-tested against CN-Tower-shaped and Eiffel-shaped inputs, but no real
+  tile has been exported since. Watch the two funnel counts ("floating parts
+  sat down…", "…dropped") on the next Tokyo or Paris run: a large drop count on
+  an ordinary city block means the support test is too strict.
 - Railway deployment: `serve.py` should move over unchanged. Jobs are in-memory
   and capped at 6, so a restart loses them.
 - Attribution obligations: ODbL for OpenStreetMap, CDLA for Overture,
