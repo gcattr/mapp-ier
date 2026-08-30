@@ -267,28 +267,62 @@ everything:
 Neither is listed in `requiredextensions`: a slicer that understands no
 material extension should still load the geometry rather than refuse the file.
 
-### Bambu Studio project metadata
+### Bambu Studio project metadata — what works and what does not
 
-On top of that, every plate carries `Metadata/model_settings.config` and
-`Metadata/project_settings.config`, so it opens in Bambu Studio as a project
-with the right filament already in each AMS slot rather than as bare geometry
-with everything on slot 1. `--no-bambu-project` turns this off.
+Every plate carries `Metadata/model_settings.config` and
+`Metadata/project_settings.config`. `--no-bambu-project` turns both off.
 
-- `model_settings.config` pins object *i* to extruder *i*.
-- `project_settings.config` carries `filament_colour`, `filament_type`,
-  `filament_ids` and `filament_settings_id`, plus a `map2model_slots` list the
-  slicer ignores — it is there so whoever loads the AMS can read what each slot
-  is for without opening the console.
+**`model_settings.config` works.** It pins object *i* to extruder *i*, and
+Bambu Studio honours it — verified by round-tripping a plate through the
+Bambu Studio CLI (`bambu-studio.exe file.3mf --export-3mf out.3mf`) and reading
+the assignments back out. terrain=1, greenery=2, roads=3, buildings=4 survive
+intact, and so does frame=1, water=2 on the frame plate.
+
+**`project_settings.config` is ignored.** Bambu discards it and falls back to
+its own defaults — a *single* filament, `#00AE42`. So the plate does **not**
+arrive with the buyer's four colours preloaded. Four objects pointing at
+extruders 1-4 in a project that has one filament is exactly the "colours are
+wrong" report.
+
+This was established, not assumed:
+
+| Experiment | Result |
+|---|---|
+| Our plate, 12-key config | `filament_colour: ['#00AE42']`, printer `None` |
+| Our plate, complete 526-key P1S config from `--export-settings` | still `['#00AE42']` |
+| **Control:** a real MakerWorld 4-colour project, same round-trip | `['#FFFFFF','#000000','#0000FF','#0FCA92']`, printer preserved |
+| Our plate + `BambuStudio:3mfVersion` marker | Bambu **refuses to load it at all** — no output, no error |
+
+The control passing is what makes the rest meaningful: the round-trip does
+preserve project settings, for a file Bambu accepts as its own project. Ours is
+not one. The marker is a gate, and claiming it without the rest of the
+structure — production extension (`xmlns:p`), per-object `p:UUID`, geometry in
+`3D/Objects/*.model` referenced by `<components>`, plate metadata, and the
+matching `.rels` — makes loading fail outright rather than degrade.
+
+So `project_settings.config` stays for now as a **manifest, not a
+configuration**: `map2model_slots` records what each slot is for, in a file
+anyone can read. Do not trust it to configure a slicer, and do not tell a
+seller it will.
+
+**What the seller actually does.** Object order is fixed and documented, so the
+AMS is loaded once and every order after that is right. The exporter prints the
+slot list at the end of a run:
+
+```
+  AMS slots, per plate. Bambu assigns by object order, so
+  load the slots in exactly this order:
+    monaco2.3mf
+      slot 1  #61C680  PLA Matte Grass Green    (terrain)
+      slot 2  #FFFFFF  PLA Basic Jade White     (greenery)
+      slot 3  #000000  PLA Basic Black          (roads)
+      slot 4  #8E9089  PLA Basic Gray           (buildings)
+```
 
 The Bambu SKU codes (`GFA00` = PLA Basic, `GFA01` = PLA Matte, `GFG02` =
 PETG HF) and the preset names are not guesses: they were read out of the
 profiles that ship with Bambu Studio, at
 `resources/profiles/BBL/filament/<name> @base.json`.
-
-**Not yet verified on the machine.** The 3MF is well-formed and the metadata
-matches a real MakerWorld project file field for field, but nobody has opened
-one of these in Bambu Studio and confirmed the AMS slots come up right. That is
-the one thing to check before the first real order.
 
 ## Print-volume rules
 
@@ -489,6 +523,22 @@ Verified in a real browser at desktop width: tour, picker, tab switching and
 the copied command. The 560 px block could not be exercised — the window would
 not resize on this display — so it was checked by reading the parsed
 stylesheet back out of the browser and confirming all 19 rules survived.
+
+## Testing the exporter
+
+`test_export.py` — no network, no DuckDB, throwaway tetrahedra for meshes.
+What it covers is everything *after* geometry: which filament each layer gets,
+what lands in the 3MF, and whether a slicer can read it back.
+
+```bash
+python test_export.py                   # 13 checks, exit 0 = clean
+```
+
+Every check in it is a bug that shipped. The cover one in particular: the cover
+is written as `cover_left` and `cover_right`, which matched no key in
+`DEFAULT_FILAMENTS`, so both silently fell through to `basic_gray` — the
+shipping shell was being specced in a buyer's PLA instead of PETG.
+`filament_of()` folds `cover_*` to `cover` now.
 
 ## Testing
 

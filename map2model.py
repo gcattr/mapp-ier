@@ -191,7 +191,16 @@ PICKABLE = ("terrain", "greenery", "roads", "buildings", "water", "frame")
 
 
 def filament_of(cfg, layer):
-    """(name, type, bambu_id, hex) for a layer, falling back to the default."""
+    """
+    (name, type, bambu_id, hex) for a layer, falling back to the default.
+
+    The cover is written as two objects, `cover_left` and `cover_right`, but it
+    is one part with one setting. Without this fold they matched no key in
+    DEFAULT_FILAMENTS and silently fell through to basic_gray -- the shipping
+    shell was being specced in a buyer's PLA instead of PETG.
+    """
+    if layer.startswith("cover_"):
+        layer = "cover"
     key = (cfg.filaments or {}).get(layer) or DEFAULT_FILAMENTS.get(layer)
     return FILAMENTS.get(key) or FILAMENTS[DEFAULT_FILAMENTS.get(layer, "basic_gray")]
 
@@ -2682,6 +2691,15 @@ def run(cfg, out_path):
                           f"x {hgt:.0f} mm  ({axis})", file=sys.stderr)
                 print("         Reduce the print size, or lower the building "
                       "stretch.", file=sys.stderr)
+            print("\n  AMS slots, per plate. Bambu assigns by object order, so"
+                  "\n  load the slots in exactly this order:", file=sys.stderr)
+            for path, names in written:
+                print(f"    {os.path.basename(path)}", file=sys.stderr)
+                for i, n in enumerate(names, start=1):
+                    fil = filament_of(cfg, n)
+                    print(f"      slot {i}  {fil[3]}  {fil[0]:<24} ({n})",
+                          file=sys.stderr)
+
             if cfg.water_in_frame:
                 print("\n  Print the land model with your 4 filaments, and the"
                       "\n  frame+water plate with 2. Glue the land on top of the"
