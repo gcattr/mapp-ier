@@ -573,10 +573,18 @@ function filGrid(layer){
 
 function drawFilms(){
   const wif = true;   // water always prints with the frame
-  let slot = 0;
+  /* Slots are per FILAMENT, not per layer: two layers in the same colour share
+     one AMS slot, because you cannot load one spool into two trays. The
+     exporter maps them the same way, and if these two ever disagree the panel
+     is telling the buyer a slot number the printer will not use. */
+  const seen = new Map();
+  const slotOf = k => {
+    if(!seen.has(pick[k])) seen.set(pick[k], seen.size + 1);
+    return seen.get(pick[k]);
+  };
   $('films').innerHTML = FILMS.map(f=>{
     const onPlate = on[f.k] && !(f.k==='water'&&wif) && f.k!=='frame';
-    if(onPlate) slot++;
+    const slot = onPlate ? slotOf(f.k) : 0;
     const tag = !on[f.k] ? 'off'
               : (f.k==='water'&&wif) ? 'frame plate'
               : f.k==='frame' ? 'frame plate' : 'slot '+slot;

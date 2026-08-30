@@ -147,34 +147,44 @@ def _pindex_points_at_the_right_base():
 check("every object points at its own material", _pindex_points_at_the_right_base)
 
 
-def _extruders_are_slot_order():
+def _parts_are_slot_order():
     z = write(LAND)
     ms = z.read("Metadata/model_settings.config").decode()
-    pairs = re.findall(r'key="name" value="([^"]*)"/>\s*<metadata key="extruder" value="(\d+)"', ms)
+    # one object, one part per layer -- four separate objects occupy the same
+    # space and Bambu's arrange spreads them onto four plates
+    assert ms.count("<object ") == 1, "expected a single object, got " + str(ms.count("<object "))
+    assert ms.count("<plate>") == 1, "expected a single plate"
+    pairs = re.findall(r'key="name" value="([^"]*)"/>\s*<metadata key="matrix"[^/]*/>'
+                       r'\s*<metadata key="extruder" value="(\d+)"', ms)
     assert pairs == [(n, str(i)) for i, n in enumerate(LAND, 1)], pairs
 
 
-check("model_settings pins object i to extruder i", _extruders_are_slot_order)
+check("each part gets its own extruder, in slot order", _parts_are_slot_order)
 
 
 def _frame_plate_is_two_slots():
     z = write(["frame", "water"])
     ms = z.read("Metadata/model_settings.config").decode()
-    pairs = re.findall(r'key="name" value="([^"]*)"/>\s*<metadata key="extruder" value="(\d+)"', ms)
+    pairs = re.findall(r'key="name" value="([^"]*)"/>\s*<metadata key="matrix"[^/]*/>'
+                       r'\s*<metadata key="extruder" value="(\d+)"', ms)
     assert pairs == [("frame", "1"), ("water", "2")], pairs
 
 
 check("the frame plate is frame=1, water=2", _frame_plate_is_two_slots)
 
 
-def _no_required_extension():
+def _materials_are_never_required():
+    # A slicer that understands no MATERIAL extension must still load the
+    # geometry rather than refuse the file. The production extension ("p") is
+    # a different matter: a Bambu project genuinely requires it.
     x = model_xml(write(LAND))
-    # A slicer that understands no material extension must still load the
-    # geometry rather than refuse the file.
-    assert "requiredextensions" not in x, "the materials extension was marked required"
+    req = re.search(r'requiredextensions="([^"]*)"', x)
+    assert not req or "m" not in req.group(1).split(),         "the materials extension was marked required: " + (req.group(1) if req else "")
+    plain = model_xml(write(LAND, M.Config(bbox=(0, 0, 1, 1), bambu_project=False)))
+    assert "requiredextensions" not in plain,         "the portable file demands an extension it does not need"
 
 
-check("the materials extension is not marked required", _no_required_extension)
+check("the materials extension is never required", _materials_are_never_required)
 
 
 def _opt_out_works():
@@ -201,6 +211,91 @@ def _xml_is_wellformed():
 
 
 check("every XML and JSON part parses", _xml_is_wellformed)
+
+
+def _slots_are_per_filament():
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    fils = [M.filament_of(cfg, n) for n in ("cover_left", "cover_right")]
+    assign, distinct = M.slot_map(fils)
+    # One PETG shell in two halves is ONE spool. Giving it two slots makes
+    # Bambu treat the plate as multi-colour: prime tower and filament swaps for
+    # a shipping shell.
+    assert assign == [1, 1], assign
+    assert len(distinct) == 1, distinct
+
+    fils = [M.filament_of(cfg, n) for n in LAND]
+    assign, distinct = M.slot_map(fils)
+    assert assign == [1, 2, 3, 4] and len(distinct) == 4, (assign, distinct)
+
+    # a buyer who picks one colour twice needs one spool, not two
+    cfg = M.Config(bbox=(0, 0, 1, 1), filaments={"buildings": "basic_jade_white"})
+    fils = [M.filament_of(cfg, n) for n in LAND]
+    assign, distinct = M.slot_map(fils)
+    assert assign == [1, 2, 3, 2], assign
+    assert len(distinct) == 3, distinct
+
+
+check("two parts in one filament share a slot", _slots_are_per_filament)
+
+
+def _project_config_is_consistent():
+    if M._bambu_template() is None:
+        raise AssertionError("bambu_p1s_0.4.json is missing; the plate cannot "
+                             "be written as a Bambu project")
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    fils = [M.filament_of(cfg, n) for n in LAND]
+    d = M._project_settings(cfg, fils)
+    n = len(M.slot_map(fils)[1])
+    # THE BUG THIS EXISTS FOR: a config where some per-filament list is still
+    # length 1 is internally inconsistent, and Bambu does not repair it or
+    # merge it -- it discards the whole config and falls back to one filament,
+    # so every part prints in the same colour. Five of the twenty per-filament
+    # keys do not start with "filament", which is how they got missed.
+    for k in M.PER_FILAMENT:
+        # An empty list stays empty: that is how Bambu writes filament_notes,
+        # and a plate carrying it round-trips fine. Only a SHORT list is the
+        # inconsistency that gets the config thrown away.
+        if k in d and d[k]:
+            assert len(d[k]) == n, (f"{k} has {len(d[k])} entries, expected {n}"
+                                    f" -- Bambu will discard the whole config")
+    for k in M.PER_PRESET:
+        if k in d:
+            assert len(d[k]) == n + 2, f"{k} has {len(d[k])}, expected {n + 2}"
+    assert d["filament_colour"] == [f[3] for f in M.slot_map(fils)[1]]
+    assert d["filament_self_index"] == [str(i) for i in range(1, n + 1)]
+    assert d.get("printer_settings_id"), "the printer preset went missing"
+
+
+check("the project config is internally consistent", _project_config_is_consistent)
+
+
+def _plate_sits_on_the_bed():
+    x = model_xml(write(LAND))
+    item = re.search(r'<item objectid="\d+"[^>]*transform="([^"]*)"', x)
+    assert item, "no build item"
+    nums = [float(v) for v in item.group(1).split()]
+    dx, dy, dz = nums[9], nums[10], nums[11]
+    # Geometry is built around the origin with negative Z -- that is the bed's
+    # CORNER, and below the plate. The offset rides in the build item so the
+    # mesh itself is untouched and serve.py still reads what it always did.
+    assert dx > 0 and dy > 0, f"the plate was not centred on the bed: {dx}, {dy}"
+    assert dz >= 0, f"the plate still starts below the bed: {dz}"
+
+
+check("the plate is placed on the bed, not through it", _plate_sits_on_the_bed)
+
+
+def _one_object_many_parts():
+    x = model_xml(write(LAND))
+    # four objects that occupy the same space get arranged onto four separate
+    # plates; as components of one object they stay a single tile
+    assert "<components>" in x, "the layers were not assembled into one object"
+    assert x.count("<component ") == len(LAND), x.count("<component ")
+    assert 'requiredextensions="p"' in x, "the production extension is not declared"
+    assert "BambuStudio:3mfVersion" in x, "the file does not identify as a Bambu project"
+
+
+check("the layers are one object with a part each", _one_object_many_parts)
 
 
 def _output_routing():

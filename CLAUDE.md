@@ -267,62 +267,98 @@ everything:
 Neither is listed in `requiredextensions`: a slicer that understands no
 material extension should still load the geometry rather than refuse the file.
 
-### Bambu Studio project metadata — what works and what does not
+### Bambu Studio project metadata
 
-Every plate carries `Metadata/model_settings.config` and
-`Metadata/project_settings.config`. `--no-bambu-project` turns both off.
+Each plate is written as a **real Bambu Studio project**, so it opens with the
+right colour and filament already in every AMS slot. Getting there took four
+things, and leaving out any one of them silently breaks it:
 
-**`model_settings.config` works.** It pins object *i* to extruder *i*, and
-Bambu Studio honours it — verified by round-tripping a plate through the
-Bambu Studio CLI (`bambu-studio.exe file.3mf --export-3mf out.3mf`) and reading
-the assignments back out. terrain=1, greenery=2, roads=3, buildings=4 survive
-intact, and so does frame=1, water=2 on the frame plate.
+**1. It must identify as a Bambu project.** `xmlns:BambuStudio`,
+`<metadata name="BambuStudio:3mfVersion">1</metadata>`, the production
+extension (`xmlns:p`, `requiredextensions="p"`) and a `p:UUID` on every object,
+component, build and item. Without the marker Bambu ignores
+`project_settings.config` entirely; *with* the marker but without the rest, it
+refuses to load the file at all — no output, no error.
 
-**`project_settings.config` is ignored.** Bambu discards it and falls back to
-its own defaults — a *single* filament, `#00AE42`. So the plate does **not**
-arrive with the buyer's four colours preloaded. Four objects pointing at
-extruders 1-4 in a project that has one filament is exactly the "colours are
-wrong" report.
+**2. One object, one part per layer.** Not one object per layer. Our four
+layers occupy the same space, and Bambu's arrange treats four colliding objects
+as four things to spread out — it put a plate on **four separate plates**. As
+components of a single object they stay put and the tile prints as one piece.
+Extruders are set per `<part>` in `model_settings.config`.
 
-This was established, not assumed:
+**3. The project config must be Bambu's own, and internally consistent.** A
+partial config is not merged, it is *discarded*, and the plate falls back to a
+single filament — which is exactly how four objects on extruders 1-4 all came
+out one colour. `bambu_p1s_0.4.json` is a config Bambu Studio wrote, shipped
+alongside the exporter; `_project_settings()` widens the per-slot lists and
+writes our filaments in.
 
-| Experiment | Result |
-|---|---|
-| Our plate, 12-key config | `filament_colour: ['#00AE42']`, printer `None` |
-| Our plate, complete 526-key P1S config from `--export-settings` | still `['#00AE42']` |
-| **Control:** a real MakerWorld 4-colour project, same round-trip | `['#FFFFFF','#000000','#0000FF','#0FCA92']`, printer preserved |
-| Our plate + `BambuStudio:3mfVersion` marker | Bambu **refuses to load it at all** — no output, no error |
+The trap is which keys are per-slot. Twenty of them are, and **five do not
+start with `filament`** — `nozzle_temperature`,
+`nozzle_temperature_initial_layer`, `long_retractions_when_ec`,
+`retraction_distances_when_ec`, `slow_down_min_speed`. Widen only the
+`filament*` keys and the config is inconsistent, Bambu throws all of it away,
+and the plate prints in one colour with nothing in the file looking wrong.
+`PER_FILAMENT` and `PER_PRESET` were derived, not guessed: export the same
+model from Bambu twice, once with one filament and once with four, and diff.
+Keys going 1→4 are per-filament; keys going 3→6 are per-preset (process +
+printer + each filament).
 
-The control passing is what makes the rest meaningful: the round-trip does
-preserve project settings, for a file Bambu accepts as its own project. Ours is
-not one. The marker is a gate, and claiming it without the rest of the
-structure — production extension (`xmlns:p`), per-object `p:UUID`, geometry in
-`3D/Objects/*.model` referenced by `<components>`, plate metadata, and the
-matching `.rels` — makes loading fail outright rather than degrade.
+**4. Put the plate on the bed.** Our geometry is built around the origin with
+negative Z — that is the bed's *corner*, and below the plate. The offset rides
+in the build item's transform, so the mesh is untouched and `serve.py` still
+reads what it always did.
 
-So `project_settings.config` stays for now as a **manifest, not a
-configuration**: `map2model_slots` records what each slot is for, in a file
-anyone can read. Do not trust it to configure a slicer, and do not tell a
-seller it will.
+**Slots are per filament, not per part.** Two parts in the same filament share
+a slot: you cannot load one spool into two trays, and pretending otherwise
+makes Bambu treat the plate as multi-colour — prime tower and filament swaps
+for nothing. The cover is the obvious case, two halves of one PETG shell.
+A buyer who picks the same colour twice needs three spools, not four.
+`slot_map()` is the one place this is decided, and the console mirrors it.
 
-**What the seller actually does.** Object order is fixed and documented, so the
-AMS is loaded once and every order after that is right. The exporter prints the
-slot list at the end of a run:
-
-```
-  AMS slots, per plate. Bambu assigns by object order, so
-  load the slots in exactly this order:
-    monaco2.3mf
-      slot 1  #61C680  PLA Matte Grass Green    (terrain)
-      slot 2  #FFFFFF  PLA Basic Jade White     (greenery)
-      slot 3  #000000  PLA Basic Black          (roads)
-      slot 4  #8E9089  PLA Basic Gray           (buildings)
-```
+`--no-bambu-project` writes a plain 3MF instead: geometry plus the standard
+materials extension (`<basematerials>` with per-object `pid`/`pindex`, and
+`<m:colorgroup>`), for any other slicer. Neither is in `requiredextensions`, so
+a slicer that knows no material extension still loads the geometry.
 
 The Bambu SKU codes (`GFA00` = PLA Basic, `GFA01` = PLA Matte, `GFG02` =
 PETG HF) and the preset names are not guesses: they were read out of the
 profiles that ship with Bambu Studio, at
 `resources/profiles/BBL/filament/<name> @base.json`.
+
+### Verifying it, because none of this is visible in the file
+
+A plate with a discarded config **looks perfect**. Every colour is in it, every
+extruder is assigned; the failure only appears in the slicer. So there is a
+check that asks Bambu Studio itself:
+
+```bash
+python verify_bambu.py                     # all three plate shapes
+python verify_bambu.py 3Dmodels/x/x.3mf    # a plate you already have
+```
+
+It loads a plate through the Bambu Studio CLI, has it re-export the project,
+and reads the filaments and per-part extruders back out of what Bambu wrote.
+For a supplied file the expectation comes from the file's own
+`project_settings.config` — whatever it asked for is what Bambu must read back.
+It skips cleanly when Bambu Studio is not installed.
+
+The control matters: a real MakerWorld 4-colour project survives the identical
+round-trip with all four colours and its printer. Without that, a passing
+round-trip would prove nothing about the method.
+
+Regenerate the template (paths shift between Bambu versions):
+
+```bash
+bambu-studio.exe any.3mf \
+  --load-settings "<profiles>/BBL/machine/Bambu Lab P1S 0.4 nozzle.json;\
+<profiles>/BBL/process/0.20mm Standard @BBL X1C.json" \
+  --load-filaments "<profiles>/BBL/filament/Bambu PLA Basic @BBL P1S 0.4 nozzle.json" \
+  --export-3mf out.3mf
+```
+
+then take `Metadata/project_settings.config` out of `out.3mf`. Load **one**
+filament, so every per-slot list has length 1 and widening is deterministic.
 
 ## Print-volume rules
 
@@ -531,7 +567,7 @@ What it covers is everything *after* geometry: which filament each layer gets,
 what lands in the 3MF, and whether a slicer can read it back.
 
 ```bash
-python test_export.py                   # 13 checks, exit 0 = clean
+python test_export.py                   # 17 checks, exit 0 = clean
 ```
 
 Every check in it is a bug that shipped. The cover one in particular: the cover
