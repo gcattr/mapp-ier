@@ -211,8 +211,9 @@ select{width:auto;min-width:118px;font-family:var(--sans)}
 .tournav button{font:inherit;font-size:13px;padding:9px 16px;min-height:40px;
   border-radius:2px;cursor:pointer;border:1px solid var(--ink);
   background:var(--ink);color:#fff}
-.tournav .ghost{background:transparent;color:var(--ink-40);border-color:transparent}
-.tournav .ghost:hover{color:var(--ink)}
+.tournav .ghost{background:#fff;color:var(--ink);border-color:var(--rule)}
+.tournav .ghost:hover{background:#F2F5F7;border-color:#9BB0C0}
+#tourSkip{font-weight:600}
 .tournav #tourNext{margin-left:auto}
 .dots{display:flex;gap:5px;flex:1;justify-content:center}
 .dots i{width:6px;height:6px;border-radius:50%;background:#CBD5DD}
@@ -693,8 +694,8 @@ function openTour(at){
 }
 function closeTour(){
   $('tour').classList.add('hidden');
-  // localStorage throws outright in some privacy modes; a tour that cannot be
-  // remembered is a papercut, a page that will not load is not.
+  // Recorded but not acted on: the tour opens every visit. Kept because it is
+  // the one signal that someone has been here before, if that is ever wanted.
   try{ localStorage.setItem(TOUR_SEEN,'1'); }catch(e){}
 }
 function tourNext(){
@@ -702,11 +703,11 @@ function tourNext(){
   tourAt++; drawTour();
 }
 function tourBack(){ if(tourAt>0){ tourAt--; drawTour(); } }
-function maybeOpenTour(){
-  let seen = false;
-  try{ seen = localStorage.getItem(TOUR_SEEN)==='1'; }catch(e){}
-  if(!seen) openTour(0);
-}
+/* Every visit, not just the first. Buyers arrive from an Etsy listing months
+   apart and on whatever device is to hand; "you saw this once in a browser you
+   no longer use" is not a reason to drop someone into an unexplained map. It
+   is one tap to leave. */
+function maybeOpenTour(){ openTour(0); }
 
 /* ---------------- square tile ---------------- */
 let centre = {lat:43.6455, lng:-79.3860}, spanM = 1600;
@@ -717,7 +718,12 @@ function bboxOf(){
   return {w:centre.lng-dLng, e:centre.lng+dLng, s:centre.lat-dLat, n:centre.lat+dLat};
 }
 
-const map = L.map('map').setView([centre.lat, centre.lng], 14);
+const map = L.map('map', {zoomControl:false})
+  .setView([centre.lat, centre.lng], 14);
+// Leaflet puts zoom at the top left by default, which is exactly where the
+// search box and "Drag a tile" are. Top right is clear: the attribution is
+// bottom right and the tile controls are bottom left.
+L.control.zoom({position:'topright'}).addTo(map);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
   {maxZoom:19, attribution:'© OpenStreetMap contributors'}).addTo(map);
 let rect = L.rectangle([[0,0],[0,0]],

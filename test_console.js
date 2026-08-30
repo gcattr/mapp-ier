@@ -93,6 +93,8 @@ const L = {
   rectangle() { return layer(); },
   marker() { return layer(); },
   latLng: latlng,
+  // the zoom control is added by hand so it does not land on the search box
+  control: { zoom(opts) { return { opts, addTo() { return this; } }; } },
 };
 
 /* ---------------- three.js stub ---------------- */
@@ -561,15 +563,42 @@ check('the tour is actually opened on page load', () => {
      'maybeOpenTour is never called at startup, so no visitor ever sees the tour');
 });
 
-check('the tour is shown once, and skipping counts as shown', () => {
+check('the tour opens on every visit, not just the first', () => {
   sandbox.localStorage.store = {};
   G.maybeOpenTour();
   ok(!document.getElementById('tour').classList.contains('hidden'),
      'a first-time visitor was not shown the tour');
   G.closeTour();
-  G.maybeOpenTour();
   ok(document.getElementById('tour').classList.contains('hidden'),
-     'the tour came back after being dismissed');
+     'closing did not close it');
+  // a returning visitor gets it again: they arrive from an Etsy listing months
+  // apart, on whatever device is to hand
+  G.maybeOpenTour();
+  ok(!document.getElementById('tour').classList.contains('hidden'),
+     'a returning visitor was dropped into an unexplained map');
+  G.closeTour();
+});
+
+check('skip is a real button, not a grey word', () => {
+  // As a borderless grey caption it did not read as a control, so the only
+  // obvious way out of the card was six taps of Next.
+  const css = html.slice(html.indexOf('.tournav'), html.indexOf('</style>'));
+  const ghost = css.slice(css.indexOf('.tournav .ghost'));
+  const rule = ghost.slice(0, ghost.indexOf('}'));
+  ok(!/border-color:\s*transparent/.test(rule),
+     'skip still has no border: ' + rule);
+  ok(!/color:\s*var\(--ink-40\)/.test(rule),
+     'skip is still greyed out: ' + rule);
+});
+
+check('the map zoom buttons do not sit on the search box', () => {
+  // Leaflet defaults zoom to the top left, which is where the search box and
+  // "Drag a tile" are -- the +/- landed on top of them.
+  ok(/zoomControl\s*:\s*false/.test(src),
+     'the default top-left zoom control is still enabled');
+  const m = src.match(/L\.control\.zoom\(\{position\s*:\s*'([a-z]+)'/);
+  ok(m, 'no zoom control is added back');
+  ok(m[1] !== 'topleft', 'zoom was put back where the map tools are');
 });
 
 check('a browser that blocks storage still loads the page', () => {

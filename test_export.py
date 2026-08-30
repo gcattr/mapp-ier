@@ -116,6 +116,221 @@ def _bad_input_is_rejected():
 check("an unknown layer or colour is refused, not defaulted", _bad_input_is_rejected)
 
 
+# ------------------------------------------------------- the parallel fetch
+print("\nfetching six layers at once:")
+
+
+class _FakeCursor:
+    def __init__(self, owner):
+        self.owner = owner
+
+    def close(self):
+        self.owner.closed_cursors += 1
+
+
+class _FakeCon:
+    """Stands in for a DuckDB connection, and counts what threads asked of it."""
+
+    def __init__(self):
+        self.cursors = 0
+        self.closed_cursors = 0
+        self.closed = False
+
+    def cursor(self):
+        self.cursors += 1
+        return _FakeCursor(self)
+
+    def close(self):
+        self.closed = True
+
+
+def _fetch_all_parallel():
+    import threading
+    import time
+
+    con = _FakeCon()
+    seen, threads, lock = [], set(), threading.Lock()
+
+    def fake_fetch(cfg, cur, release, theme, typ, cols, where=""):
+        assert isinstance(cur, _FakeCursor), \
+            "a worker used the shared connection; DuckDB is not thread-safe"
+        with lock:
+            threads.add(threading.get_ident())
+            seen.append(typ)
+        time.sleep(0.02)                       # long enough to overlap
+        return [{"typ": typ}]
+
+    old = (M._con, M.fetch, M.resolve_release)
+    M._con = lambda cfg: con
+    M.fetch = fake_fetch
+    M.resolve_release = lambda cfg: "test"
+    try:
+        cfg = M.Config(bbox=(0, 0, 1, 1), verbose=False)
+        b, parts, water, green, roads = M.fetch_all_overture(cfg)
+    finally:
+        M._con, M.fetch, M.resolve_release = old
+
+    assert b and parts and water and roads, (b, parts, water, roads)
+    # greenery is two Overture types concatenated, not one
+    assert len(green) == 2, green
+    assert sorted(seen) == sorted(["building", "building_part", "water",
+                                   "land_cover", "land_use", "segment"]), seen
+    assert len(threads) > 1, "the layers ran one after another, not at once"
+    assert con.cursors == 6, f"{con.cursors} cursors for 6 layers"
+    assert con.closed_cursors == 6, "a cursor was leaked"
+    assert con.closed, "the connection was left open"
+
+
+check("every layer runs at once, each on its own cursor", _fetch_all_parallel)
+
+
+def _fetch_all_sequential():
+    import threading
+
+    con = _FakeCon()
+    threads = set()
+
+    def fake_fetch(cfg, cur, release, theme, typ, cols, where=""):
+        threads.add(threading.get_ident())
+        return []
+
+    old = (M._con, M.fetch, M.resolve_release)
+    M._con = lambda cfg: con
+    M.fetch = fake_fetch
+    M.resolve_release = lambda cfg: "test"
+    try:
+        M.fetch_all_overture(M.Config(bbox=(0, 0, 1, 1), fetch_workers=1,
+                                      verbose=False))
+    finally:
+        M._con, M.fetch, M.resolve_release = old
+    assert len(threads) == 1, "fetch_workers=1 still spawned threads"
+
+
+check("--fetch-workers 1 stays on one thread", _fetch_all_sequential)
+
+
+def _lod1_skips_parts():
+    con = _FakeCon()
+    asked = []
+
+    def fake_fetch(cfg, cur, release, theme, typ, cols, where=""):
+        asked.append(typ)
+        return []
+
+    old = (M._con, M.fetch, M.resolve_release)
+    M._con = lambda cfg: con
+    M.fetch = fake_fetch
+    M.resolve_release = lambda cfg: "test"
+    try:
+        M.fetch_all_overture(M.Config(bbox=(0, 0, 1, 1), lod=1, verbose=False))
+    finally:
+        M._con, M.fetch, M.resolve_release = old
+    assert "building_part" not in asked, "LOD1 still paid for a parts scan"
+
+
+check("LOD1 does not scan for building parts", _lod1_skips_parts)
+
+
+# ------------------------------------------------------------- floating parts
+print("\nparts that hang in mid-air:")
+
+
+def _shapes():
+    from shapely.geometry import box, Point
+    return box, Point
+
+
+def _overhangs_survive():
+    box, Point = _shapes()
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    # The CN Tower: the pod overlaps the shaft it sits on, and the mast
+    # overlaps the pod. Every one of these is a legitimate overhang and must
+    # come through untouched -- this is the case the whole rule exists to spare.
+    items = [("shaft", [box(-11, -11, 11, 11)], 0.0, 340.0),
+             ("pod", [Point(0, 0).buffer(24)], 330.0, 360.0),
+             ("mast", [box(-2, -2, 2, 2)], 360.0, 553.0)]
+    out, grounded, dropped = M.resolve_floating(cfg, items)
+    assert (grounded, dropped) == (0, 0), (grounded, dropped)
+    assert [o[2] for o in out] == [0.0, 330.0, 360.0], [o[2] for o in out]
+
+
+check("a real overhang is never touched", _overhangs_survive)
+
+
+def _aerials_are_dropped():
+    box, Point = _shapes()
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    # 2 m wide, starting 300 m up, overlapping nothing below. Grounding it
+    # would draw a 300 m column one nozzle wide, which also becomes the
+    # tallest thing in the model and sets the cover height.
+    items = [("base", [box(-50, -50, 50, 50)], 0.0, 115.0),
+             ("aerial", [box(115, 115, 117, 117)], 300.0, 324.0)]
+    out, grounded, dropped = M.resolve_floating(cfg, items)
+    assert dropped == 1 and grounded == 0, (grounded, dropped)
+    assert len(out) == 1 and out[0][0] == "base", out
+
+
+check("a detached aerial is dropped, not drawn as a needle", _aerials_are_dropped)
+
+
+def _low_floaters_are_grounded():
+    box, Point = _shapes()
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    items = [("base", [box(-50, -50, 50, 50)], 0.0, 115.0),
+             ("stub", [box(115, 115, 117, 117)], 10.0, 24.0)]
+    out, grounded, dropped = M.resolve_floating(cfg, items)
+    assert (grounded, dropped) == (1, 0), (grounded, dropped)
+    assert out[1][2] == 0.0, "it did not come down to the ground: " + str(out[1][2])
+
+
+check("a low floater sits down instead of being dropped", _low_floaters_are_grounded)
+
+
+def _part_lands_on_what_is_below():
+    box, Point = _shapes()
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    # floats at 60 but there is a 0..20 podium under it: it lands on 20, not 0
+    items = [("podium", [box(-30, -30, 30, 30)], 0.0, 20.0),
+             ("slab", [box(-10, -10, 10, 10)], 60.0, 75.0)]
+    out, grounded, dropped = M.resolve_floating(cfg, items)
+    assert grounded == 1, (grounded, dropped)
+    assert out[1][2] == 20.0, "landed at " + str(out[1][2]) + ", expected 20"
+
+
+check("a floater lands on what is under it, not on the ground",
+      _part_lands_on_what_is_below)
+
+
+def _modes():
+    box, Point = _shapes()
+    items = [("base", [box(-50, -50, 50, 50)], 0.0, 115.0),
+             ("stub", [box(115, 115, 117, 117)], 10.0, 24.0)]
+    out, g, d = M.resolve_floating(
+        M.Config(bbox=(0, 0, 1, 1), floating_parts="drop"), items)
+    assert (g, d) == (0, 1), (g, d)
+    out, g, d = M.resolve_floating(
+        M.Config(bbox=(0, 0, 1, 1), floating_parts="keep"), items)
+    assert (g, d) == (0, 0) and out[1][2] == 10.0, "keep changed the data"
+
+
+check("--floating-parts drop / keep do what they say", _modes)
+
+
+# --------------------------------------------------------------------- terrain
+def _terrain_zoom_follows_the_tile():
+    small = M.Config(bbox=(139.7420, 35.6560, 139.7500, 35.6620))   # 700 m
+    big = M.Config(bbox=(139.70, 35.64, 139.74, 35.67))             # ~3.5 km
+    zs, zb = M.terrain_zoom_for(small), M.terrain_zoom_for(big)
+    # A fixed z14 is ~8 m per sample at Tokyo, so a 700 m tile was interpolating
+    # detail that was never in the data and came out faceted.
+    assert zs > zb, f"small tile got z{zs}, big tile z{zb}"
+    assert zs <= small.terrain_zoom_max, f"z{zs} is past what terrarium holds"
+    assert zb >= 12, f"big tile fell to z{zb}"
+
+
+check("terrain resolution follows the tile size", _terrain_zoom_follows_the_tile)
+
+
 # ------------------------------------------------------------------ the file
 print("\nwhat lands in the 3MF:")
 

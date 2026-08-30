@@ -142,6 +142,27 @@ concave L/U footprints the centroid is OUTSIDE the polygon, so fall back to
 part's height. A per-part fraction cannot express "flare only near the ground" —
 that was the "blade" silhouette.
 
+**Nothing may hang in mid-air.** A `building:part` carries its own
+`min_height` and nothing guarantees anything is underneath it. Overture is full
+of parts that start a hundred metres up with no volume below — masts, aerials,
+upper platforms — and they came out as debris floating over the city, worst
+around the Eiffel Tower.
+
+The distinction that matters is **overhang vs. floating**, and the test is
+overlap in plan: a part is supported when another part of the same building
+starts lower *and* overlaps it from above. That keeps the CN Tower's
+observation pod (it overlaps the shaft) and catches an aerial hanging in space
+(it overlaps nothing). `resolve_floating()`, `--floating-parts`:
+
+- `ground` (default) — lower it onto whatever is below, or to the ground.
+- `drop` — discard it.
+- `keep` — emit it floating, as the data says.
+
+Grounding has a limit. A 2 m aerial 300 m up becomes a 300 m column one nozzle
+wide: fragile, ugly, and it sets `tallest`, which sets the cover height for the
+whole model. Past `--floating-aspect` (12 : 1 height to width) the part is
+dropped instead. Both counts are in the funnel.
+
 **Synthesised tapers are opt-in.** `spire_taper=False` by default. Turning it on
 needles the top of *every* parts-bearing building, which spikes the whole city.
 The CN Tower's flare only exists via `--landmarks`; OSM/Overture model the legs
@@ -151,6 +172,19 @@ as constant-section prisms, so every faithful renderer draws them straight.
 `spatial` extension converts GeoParquet geometry to DuckDB's internal GEOMETRY
 type on some builds, which shapely can't parse ("Input buffer is smaller than
 requested object size"). There are fallbacks and a tolerant WKB reader.
+
+**Terrain resolution follows the tile.** `terrain_zoom` defaults to 0, meaning
+`terrain_zoom_for()` picks one so the DEM is about as fine as the mesh grid. A
+fixed z14 is a 156543·cos(lat)/2¹⁴ pixel — roughly 8 m at Tokyo — so a 700 m
+tile got ~90 real samples across and looked faceted no matter how high
+`terrain_grid` went: the mesh was interpolating detail that was never in the
+data. Now a 700 m tile gets z15 (~3.9 m) and a 3 km tile stays at z14, so big
+tiles do not download hundreds of PNGs for detail they cannot show.
+`terrain_grid` went 260 → 400 to match. Terrarium has nothing useful past z15,
+hence `terrain_zoom_max`.
+
+Stair-stepping on a steep slope is the DEM's own quantisation, not the grid;
+finer zoom reduces it but does not remove it.
 
 **Layer heights** match between exporter and preview: greenery 0.8 mm proud,
 roads 0.5 mm, water 0.6 mm, all embedded 0.35 mm into what's below.
@@ -360,6 +394,23 @@ bambu-studio.exe any.3mf \
 then take `Metadata/project_settings.config` out of `out.3mf`. Load **one**
 filament, so every per-slot list has length 1 and widening is deterministic.
 
+## Fetching
+
+The six Overture scans run **at once** (`fetch_workers`, default 6). Almost all
+of a build is waiting on S3, not meshing: one London tile measured 4m10s on
+buildings and 4m17s on roads against ~15s of actual geometry. Nothing depends
+on anything else, so the wall time becomes the slowest single query instead of
+the sum of six.
+
+Each worker gets `con.cursor()`, **not** the shared connection. A DuckDB
+connection is not safe across threads; cursors off one connection are, and they
+share the loaded httpfs/spatial extensions and the S3 credentials, so this
+costs nothing per query. `--fetch-workers 1` puts it back to sequential.
+
+This does not change the empty-result handling: `_confirm_empty()` still runs
+per layer, and `FETCH_ERRORS` is appended under the same lock-free pattern it
+always used (each worker touches a different layer key).
+
 ## Print-volume rules
 
 Target machine is a **Bambu Lab P1S**. The machine is 256 mm in every axis, but
@@ -450,6 +501,12 @@ becomes `tallest` and frames the camera around a box. `packaging()` now covers
 `box_` *and* `cover_`, and excludes both from the scene, the bounds and the
 object count, while the print-volume check still measures them.
 
+**The map's zoom buttons are on the right.** Leaflet defaults them to the top
+left, which is exactly where the search box and "Drag a tile" are — the +/−
+sat on top of them. `zoomControl: false`, then added back at `topright`; the
+attribution is bottom right and the tile controls bottom left, so that corner
+is the free one.
+
 **The picker is a stock list, not a colour wheel.** It used to be an
 `<input type="color">` per layer, which let a buyer choose any of 16 million
 colours, approximately nine of which the shop can print. It is now a chip
@@ -504,10 +561,17 @@ job rather than stopping it; it runs to completion, holding a slot in the
 
 ## The walkthrough
 
-Six steps on first visit, skippable at every one, and shown once —
-`localStorage['m2m.tour.v1']`, with "? Help" in the tab bar to bring it back.
-Every storage access is wrapped in try/catch: a tour that cannot be remembered
-is a papercut, a page that will not load is not.
+Six steps, skippable at every one, and shown on **every** visit — not just the
+first. Buyers arrive from an Etsy listing months apart and on whatever device
+is to hand, so "you saw this once in a browser you no longer use" is not a
+reason to drop someone into an unexplained map; it is one tap to leave.
+"? Help" in the tab bar reopens it. `localStorage['m2m.tour.v1']` is still
+written but not acted on — it is the one signal that someone has been here
+before, if that is ever wanted — and every storage access is wrapped in
+try/catch, because a page that will not load is worse than a forgotten flag.
+
+**Skip has to look like a button.** As a borderless grey word it read as a
+caption, so the only obvious way out of the card was six taps of Next.
 
 It is written for someone who has never used anything like this — an Etsy
 buyer, on a phone, who wants a model of their street. **No jargon.** A test
@@ -567,7 +631,7 @@ What it covers is everything *after* geometry: which filament each layer gets,
 what lands in the 3MF, and whether a slicer can read it back.
 
 ```bash
-python test_export.py                   # 17 checks, exit 0 = clean
+python test_export.py                   # 26 checks, exit 0 = clean
 ```
 
 Every check in it is a bug that shipped. The cover one in particular: the cover
@@ -597,7 +661,7 @@ a call to a function that no longer exists passes cleanly. This bit twice
 `test_console.js` is that harness. No dependencies, no network, no browser:
 
 ```bash
-node test_console.js                    # 43 checks, exit 0 = clean
+node test_console.js                    # 45 checks, exit 0 = clean
 node test_console.js old-console.html   # point it at an older copy
 ```
 

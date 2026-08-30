@@ -291,8 +291,12 @@ class Config:
 
     # terrain
     terrain: bool = True
-    terrain_zoom: int = 14        # AWS terrarium tile zoom (13-15 sensible)
-    terrain_grid: int = 260       # heightmap samples along the long axis
+    # 0 = pick from the tile size so the DEM is about as fine as the mesh
+    # grid; a fixed 14 is ~8 m per sample at mid latitudes, which is why a
+    # small tile came out visibly faceted. See terrain_zoom_for().
+    terrain_zoom: int = 0         # AWS terrarium tile zoom (0 = auto, 12-15)
+    terrain_zoom_max: int = 15    # terrarium has no useful detail past this
+    terrain_grid: int = 400       # heightmap samples along the long axis
     terrain_relief_mm: float = 0.0  # 0 = true relief; >0 = normalise relief to this
 
     # layer thicknesses (mm, above the terrain surface)
@@ -312,6 +316,9 @@ class Config:
     # An empty Overture result can mean "nothing here" or "the S3 scan quietly
     # dropped files". Re-run a query that returned nothing before believing it.
     retry_empty_fetch: bool = True
+    # Overture scans run at once; the wall time becomes the slowest query
+    # rather than the sum of six. 1 = sequential.
+    fetch_workers: int = 6
     road_width_m: dict = field(default_factory=lambda: {
         "motorway": 22.0, "trunk": 18.0, "primary": 15.0, "secondary": 12.0,
         "tertiary": 10.0, "residential": 8.0, "living_street": 7.0,
@@ -327,6 +334,23 @@ class Config:
     default_building_height_m: float = 8.0   # last-resort fallback, never drop a row
     min_building_height_mm: float = 0.45     # anything shorter is bumped up so it prints
     min_footprint_m2: float = 6.0            # only drops genuine slivers
+
+    # FLOATING PARTS. A building:part carries its own min_height, and nothing
+    # guarantees anything is underneath it. Overture is full of parts that
+    # start 100 m up with no parent volume below - masts, aerials, upper
+    # platforms - and they come out as debris hanging in mid-air. An OVERHANG
+    # is fine and prints (the CN Tower pod sits on the shaft); a part with
+    # nothing at all beneath it is not.
+    #   ground - lower it onto whatever is below, or to the ground  (default)
+    #   drop   - discard it
+    #   keep   - emit it floating, as the data says
+    floating_parts: str = "ground"
+    # ...except when grounding would make a needle. A 2 m aerial 300 m up
+    # becomes a 300 m column one nozzle wide: fragile, ugly, and it sets the
+    # cover height for the whole model. Past this height-to-width ratio the
+    # part is dropped instead.
+    floating_max_aspect: float = 12.0
+    floating_tol_m: float = 0.5              # slop before calling it a gap
     source: str = "overture"     # 'overture' or 'osm' (Overpass)
     lod: int = 2                 # 1 = one prism per building outline
                                  # 2 = building parts + roof shapes
@@ -773,45 +797,78 @@ def fetch_all(cfg):
 
 
 def fetch_all_overture(cfg):
+    """
+    Six independent S3 scans. Run them at once.
+
+    Nearly all of a build is spent waiting on Overture, not meshing: one London
+    tile measured 4m10s on buildings and 4m17s on roads against ~15s of actual
+    geometry. Those two do not depend on each other, and neither do the rest,
+    so the wall time is the slowest single query rather than their sum.
+
+    Each worker gets `con.cursor()`, not the shared connection. A DuckDB
+    connection is not safe to use from several threads at once, but cursors off
+    one connection are, and they share the loaded httpfs/spatial extensions and
+    the S3 credentials -- so this costs no extra setup per query.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
     con = _con(cfg)
     release = resolve_release(cfg)
     log(cfg, f"[overture] release {release}")
 
-    with Stage("fetch buildings", cfg.verbose):
-        b = fetch(cfg, con, release, "buildings", "building",
-                 ["id", "height", "min_height", "num_floors", "roof_shape",
-                  "roof_height", "roof_direction", "roof_orientation",
-                  "has_parts", "subtype", "class", "names"])
-    stage("buildings fetched", len(b))
-
-    parts = []
-    if cfg.use_building_parts and cfg.lod >= 2:
-        with Stage("fetch building_parts", cfg.verbose):
-            parts = fetch(cfg, con, release, "buildings", "building_part",
-                          ["id", "building_id", "height", "min_height",
-                           "num_floors", "roof_shape", "roof_height",
-                           "roof_direction", "roof_orientation"])
-        stage("building_parts fetched", len(parts))
-
-    with Stage("fetch water", cfg.verbose):
-        water = fetch(cfg, con, release, "base", "water", ["id", "subtype", "class"])
-    stage("water fetched", len(water))
-
-    green = []
-    for typ, cols, where in (
-            ("land_cover", ["id", "subtype"],
-             " AND subtype IN ('forest','grass','wetland','shrub')"),
-            ("land_use", ["id", "subtype", "class"],
-             " AND subtype IN ('park','recreation','cemetery','forest','golf','protected')")):
-        with Stage(f"fetch base/{typ}", cfg.verbose):
-            green += fetch(cfg, con, release, "base", typ, cols, where)
-    stage("greenery fetched", len(green))
-
     cls = ", ".join(f"'{c}'" for c in cfg.road_classes)
-    with Stage("fetch roads", cfg.verbose):
-        roads = fetch(cfg, con, release, "transportation", "segment",
-                      ["id", "subtype", "class"],
-                      f" AND subtype = 'road' AND class IN ({cls})")
+    jobs = [
+        ("buildings", "buildings", "building",
+         ["id", "height", "min_height", "num_floors", "roof_shape",
+          "roof_height", "roof_direction", "roof_orientation",
+          "has_parts", "subtype", "class", "names"], ""),
+        ("water", "base", "water", ["id", "subtype", "class"], ""),
+        ("land_cover", "base", "land_cover", ["id", "subtype"],
+         " AND subtype IN ('forest','grass','wetland','shrub')"),
+        ("land_use", "base", "land_use", ["id", "subtype", "class"],
+         " AND subtype IN ('park','recreation','cemetery','forest','golf','protected')"),
+        ("roads", "transportation", "segment", ["id", "subtype", "class"],
+         f" AND subtype = 'road' AND class IN ({cls})"),
+    ]
+    if cfg.use_building_parts and cfg.lod >= 2:
+        jobs.insert(1, ("parts", "buildings", "building_part",
+                        ["id", "building_id", "height", "min_height",
+                         "num_floors", "roof_shape", "roof_height",
+                         "roof_direction", "roof_orientation"], ""))
+
+    out = {}
+
+    def run(job):
+        name, theme, typ, cols, where = job
+        cur = con.cursor()
+        try:
+            return name, fetch(cfg, cur, release, theme, typ, cols, where)
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+
+    workers = max(1, min(cfg.fetch_workers, len(jobs)))
+    with Stage(f"fetch {len(jobs)} layers ({workers} at a time)", cfg.verbose):
+        if workers == 1:
+            for j in jobs:
+                n, rows = run(j)
+                out[n] = rows
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for n, rows in pool.map(run, jobs):
+                    out[n] = rows
+
+    b = out.get("buildings", [])
+    parts = out.get("parts", [])
+    water = out.get("water", [])
+    green = out.get("land_cover", []) + out.get("land_use", [])
+    roads = out.get("roads", [])
+    stage("buildings fetched", len(b))
+    stage("building_parts fetched", len(parts))
+    stage("water fetched", len(water))
+    stage("greenery fetched", len(green))
     stage("roads fetched", len(roads))
 
     con.close()
@@ -863,6 +920,26 @@ def _lonlat_to_tile(lon, lat, z):
     return x, y
 
 
+def terrain_zoom_for(cfg):
+    """
+    Pick a terrarium zoom so the elevation data is about as fine as the mesh.
+
+    A fixed zoom is wrong at both ends. At z14 a pixel is
+    156543 * cos(lat) / 2^14 metres -- roughly 8 m at Tokyo -- so a 700 m tile
+    got about 90 samples across and looked faceted no matter how fine
+    terrain_grid was: the mesh was interpolating data that was not there.
+    Bigger tiles do not need the detail and would download hundreds of tiles
+    for it, so this scales with the tile instead of being cranked up globally.
+    """
+    minx, miny, maxx, maxy = cfg.bbox
+    lat = math.radians((miny + maxy) / 2.0)
+    span_m = max((maxx - minx) * 111320.0 * math.cos(lat),
+                 (maxy - miny) * 110540.0)
+    want_m = max(span_m / max(cfg.terrain_grid, 2), 1.0)   # metres per sample
+    z = math.log2(156543.03392 * math.cos(lat) / want_m)
+    return int(max(12, min(cfg.terrain_zoom_max, round(z))))
+
+
 class Terrain:
     """Bilinear elevation sampler in projected metres. Falls back to flat."""
 
@@ -881,7 +958,7 @@ class Terrain:
     def _load(self, cfg, proj):
         import requests
         from PIL import Image
-        z = cfg.terrain_zoom
+        z = cfg.terrain_zoom or terrain_zoom_for(cfg)
         minx, miny, maxx, maxy = cfg.bbox
         x0, y1 = _lonlat_to_tile(minx, miny, z)
         x1, y0 = _lonlat_to_tile(maxx, maxy, z)
@@ -1889,6 +1966,50 @@ def build_frame(cfg, W, H):
     return acc.result(), floor_acc.result()
 
 
+def resolve_floating(cfg, items):
+    """
+    Sit every part on something.
+
+    `items` is [(rec, polys, base_m, top_m)] for one building, footprints in
+    projected metres. A part is supported when some other part of the same
+    building starts lower AND overlaps it in plan -- that is exactly the test
+    that keeps a real overhang (the observation pod overlaps the shaft) and
+    catches an aerial hanging in space (it overlaps nothing below).
+
+    Returns (items, grounded, dropped).
+    """
+    if cfg.floating_parts == "keep" or not items:
+        return items, 0, 0
+    tol = cfg.floating_tol_m
+    out, grounded, dropped = [], 0, 0
+    for i, (rec, polys, base, top) in enumerate(items):
+        if base <= tol:
+            out.append((rec, polys, base, top))
+            continue
+        # the highest point of anything that starts below this part and
+        # overlaps it in plan; 0 (the ground) when nothing does
+        support = 0.0
+        for j, (_r2, polys2, base2, top2) in enumerate(items):
+            if i == j or base2 >= base - tol:
+                continue
+            if any(a.intersects(b) for a in polys for b in polys2):
+                support = max(support, min(top2, base))
+        gap = base - support
+        if gap <= tol:
+            out.append((rec, polys, base, top))     # a genuine overhang
+            continue
+        if cfg.floating_parts == "drop":
+            dropped += 1
+            continue
+        width = min((short_side(p) for p in polys), default=0.0)
+        if width <= 1e-6 or gap / width > cfg.floating_max_aspect:
+            dropped += 1                            # would become a needle
+            continue
+        out.append((rec, polys, support, top))
+        grounded += 1
+    return out, grounded, dropped
+
+
 def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
     from shapely.geometry import Point
     from shapely.ops import unary_union
@@ -1906,6 +2027,7 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
     n_landmark = 0
     n_spire_merged = 0
     n_ok = n_tri_fail = 0
+    n_grounded = n_floating_dropped = 0
     n_no_geom = n_off_tile = n_too_small = 0
     tk = Ticker(len(buildings), "extruding buildings", cfg.verbose)
     tallest = 0.0
@@ -2096,6 +2218,8 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
                 z_hi = max(_kh(k) for k in spire_stack)
                 n_spire_merged += 1
             n_landmark += 1 if rule else 0
+
+            prepared = []
             for k in kids:
                 kg = to_shape(k.get("wkb"))
                 kg = proj.geom(kg) if kg is not None else None
@@ -2109,23 +2233,46 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
                 kmin = float(k.get("min_height") or 0.0)
                 if kh <= kmin:
                     kh = kmin + 2.0
-                if spire_stack and id(k) in merged_ids:
-                    if k is not base_k:
-                        continue          # folded into the merged spire
+                prepared.append((k, kpolys, kmin, float(kh)))
+
+            # The merged spire is one solid standing on the part below it, so
+            # it is resolved as a single item rather than as its members.
+            if spire_stack:
+                prepared = [it for it in prepared if id(it[0]) not in merged_ids
+                            or it[0] is base_k]
+                prepared = [(k, kp, z_lo, z_hi) if k is base_k else (k, kp, b, t)
+                            for k, kp, b, t in prepared]
+
+            prepared, g, d = resolve_floating(cfg, prepared)
+            n_grounded += g
+            n_floating_dropped += d
+
+            for k, kpolys, kmin, kh in prepared:
+                if spire_stack and k is base_k:
                     for kp in kpolys:
-                        emit(k, kp, z_lo, z_hi, is_top=True,
+                        emit(k, kp, kmin, kh, is_top=True,
                              rule=rule, allowed=True, force_spire=True,
                              center=shared_c)
                     continue
                 for kp in kpolys:
-                    emit(k, kp, kmin, float(kh), is_top=(k is top_part),
+                    emit(k, kp, kmin, kh, is_top=(k is top_part),
                          center=shared_c,
                          rule=rule, allowed=True)
         else:
             h, _src = resolve_height(rec, cfg)
             mh = float(rec.get("min_height") or 0.0)
+            top = max(h, mh + 2.0)
+            if mh > cfg.floating_tol_m:
+                # No parts, so by definition there is nothing underneath: a
+                # min_height here is a building starting in mid-air.
+                one, g, d = resolve_floating(cfg, [(rec, polys, mh, top)])
+                n_grounded += g
+                n_floating_dropped += d
+                if not one:
+                    continue
+                _r, polys, mh, top = one[0]
             for p in polys:
-                emit(rec, p, mh, max(h, mh + 2.0), rule=rule,
+                emit(rec, p, mh, top, rule=rule,
                      allowed=not cfg.taper_landmarks_only)
 
     stage("buildings with valid geometry", n_ok)
@@ -2135,6 +2282,8 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
     stage("buildings expanded into parts", used_parent)
     stage("landmark taper rules matched", n_landmark)
     stage("spire stacks merged", n_spire_merged)
+    stage("floating parts sat down on what is below", n_grounded)
+    stage("floating parts dropped (would print as a needle)", n_floating_dropped)
     stage("solids written", made)
     stage("solids dropped (triangulation)", n_tri_fail)
     return acc.result()
@@ -2973,6 +3122,24 @@ def main():
                     help="needle tip width relative to the mast (default 0.30)")
     ap.add_argument("--water-depth", type=float, default=1.2,
                     help="how deep the water basin is cut into the land (mm)")
+    ap.add_argument("--floating-parts", default="ground",
+                    choices=("ground", "drop", "keep"),
+                    help="what to do with a building part that has nothing "
+                         "underneath it. 'ground' (default) lowers it onto "
+                         "whatever is below; 'drop' discards it; 'keep' emits "
+                         "it hanging in mid-air, as the data says. Real "
+                         "overhangs are never touched - they overlap "
+                         "something below.")
+    ap.add_argument("--floating-aspect", type=float, default=12.0,
+                    help="a grounded part taller than this many times its own "
+                         "width is dropped instead of drawn as a needle")
+    ap.add_argument("--fetch-workers", type=int, default=6,
+                    help="Overture layers to scan at once (1 = sequential)")
+    ap.add_argument("--terrain-zoom", type=int, default=0,
+                    help="elevation tile zoom; 0 (default) picks one from the "
+                         "tile size so small tiles stop looking faceted")
+    ap.add_argument("--terrain-grid", type=int, default=400,
+                    help="heightmap samples along the long axis")
     ap.add_argument("--filaments", default="",
                     help="per-layer filament, e.g. "
                          "'terrain=matte_grass_green,buildings=basic_gray'. "
@@ -3091,7 +3258,11 @@ def main():
                  box_headroom_mm=a.box_headroom,
                  filaments=parse_filaments(a.filaments),
                  bambu_project=not a.no_bambu_project,
-                 printer_model=a.printer, nozzle_mm=a.nozzle)
+                 printer_model=a.printer, nozzle_mm=a.nozzle,
+                 floating_parts=a.floating_parts,
+                 floating_max_aspect=a.floating_aspect,
+                 fetch_workers=a.fetch_workers,
+                 terrain_zoom=a.terrain_zoom, terrain_grid=a.terrain_grid)
     run(cfg, a.out)
 
 
