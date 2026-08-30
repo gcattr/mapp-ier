@@ -176,6 +176,15 @@ const sandbox = {
   fetch: async () => ({ ok: false, json: async () => ({}) }),
   AbortController, URLSearchParams, JSZip: function () {},
   alert() {}, Math, Date, JSON,
+  // Real enough to test "shown once" against. store=null simulates a browser
+  // that throws on access (private mode, blocked site data), which the console
+  // has to survive rather than fail to load.
+  localStorage: {
+    store: {},
+    getItem(k) { if (!this.store) throw new Error('blocked'); return this.store[k] || null; },
+    setItem(k, v) { if (!this.store) throw new Error('blocked'); this.store[k] = String(v); },
+    removeItem(k) { if (!this.store) throw new Error('blocked'); delete this.store[k]; },
+  },
 };
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
@@ -470,14 +479,198 @@ check('picking a filament repaints the swatch and the preview colour', () => {
 });
 
 check('the picker offers no colour the shop does not stock', () => {
-  G.drawFilms();
+  G.openPickerFor('terrain');
   const html = document.getElementById('films').innerHTML;
-  const offered = [...html.matchAll(/<option value="([a-z0-9_]+)"/g)].map(m => m[1]);
-  ok(offered.length > 0, 'the picker rendered no options');
+  const offered = [...html.matchAll(/data-key="([a-z0-9_]+)"/g)].map(m => m[1]);
+  eq(offered.length, Object.keys(G.FILAMENTS).length, 'not every stocked colour is offered');
   for (const key of offered) {
     ok(G.FILAMENTS[key], 'the picker offers an unstocked filament: ' + key);
   }
+  G.closePicker();
 });
+
+check('every colour in the grid is shown as a colour, not just a name', () => {
+  G.openPickerFor('buildings');
+  const html = document.getElementById('films').innerHTML;
+  for (const [key, f] of Object.entries(G.FILAMENTS)) {
+    ok(html.includes('data-key="' + key + '"'), 'missing swatch for ' + key);
+    ok(html.toUpperCase().includes(f.hex.toUpperCase()),
+       'no colour swatch rendered for ' + key);
+  }
+  G.closePicker();
+});
+
+check('only one palette is open at a time', () => {
+  G.openPickerFor('terrain');
+  G.openPickerFor('water');
+  const html = document.getElementById('films').innerHTML;
+  eq((html.match(/data-key="basic_red"/g) || []).length, 1,
+     'two palettes were open at once');
+  G.closePicker();
+});
+
+/* ---------------- the walkthrough ---------------- */
+console.log('\nthe first-visit walkthrough:');
+check('there is a tour, and it never talks like a manual', () => {
+  ok(Array.isArray(G.TOUR) && G.TOUR.length >= 5, 'no tour steps');
+  const words = G.TOUR.map(s => s.t + ' ' + s.b).join(' ').toLowerCase();
+  // an Etsy buyer does not know, and must not have to learn, any of this
+  for (const jargon of ['3mf', 'filament slot', 'ams', 'exporter', 'stl',
+                        'bounding box', 'lod', 'cli', 'terminal', 'command line']) {
+    ok(!words.includes(jargon), 'the tour uses jargon: ' + jargon);
+  }
+  ok(/etsy/.test(words), 'the tour never mentions the Etsy order it exists for');
+});
+
+check('the tour says the size must match the Etsy order', () => {
+  const sizeStep = G.TOUR.find(s => /size/i.test(s.t));
+  ok(sizeStep, 'no step about the size');
+  const flat = sizeStep.b.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  ok(/same size you picked on etsy/i.test(flat),
+     'the size step does not tell the buyer to match their order: ' + flat);
+});
+
+check('the tour warns that a preview takes minutes', () => {
+  const words = G.TOUR.map(s => s.b).join(' ')
+    .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').toLowerCase();
+  ok(/minute/.test(words), 'nothing warns the preview is slow');
+  ok(/do not have to wait/.test(words),
+     'the tour does not say the wait is optional -- buyers will think it is required');
+});
+
+check('the tour steps forward, back, and closes at the end', () => {
+  G.openTour(0);
+  ok(!document.getElementById('tour').classList.contains('hidden'), 'tour did not open');
+  eq(document.getElementById('tourTitle').textContent, G.TOUR[0].t, 'wrong first step');
+  G.tourNext();
+  eq(document.getElementById('tourTitle').textContent, G.TOUR[1].t, 'next did not advance');
+  G.tourBack();
+  eq(document.getElementById('tourTitle').textContent, G.TOUR[0].t, 'back did not return');
+  G.tourBack();                                  // must not run off the start
+  eq(document.getElementById('tourTitle').textContent, G.TOUR[0].t, 'back ran past step 1');
+  for (let i = 0; i < G.TOUR.length; i++) G.tourNext();
+  ok(document.getElementById('tour').classList.contains('hidden'),
+     'the tour never closes');
+});
+
+check('the tour is actually opened on page load', () => {
+  // maybeOpenTour() can exist, be correct, and never run -- which is exactly
+  // what happened. Only the startup sequence proves it is wired up.
+  const startup = src.slice(src.lastIndexOf('placeRect(true)'));
+  ok(/maybeOpenTour\s*\(/.test(startup),
+     'maybeOpenTour is never called at startup, so no visitor ever sees the tour');
+});
+
+check('the tour is shown once, and skipping counts as shown', () => {
+  sandbox.localStorage.store = {};
+  G.maybeOpenTour();
+  ok(!document.getElementById('tour').classList.contains('hidden'),
+     'a first-time visitor was not shown the tour');
+  G.closeTour();
+  G.maybeOpenTour();
+  ok(document.getElementById('tour').classList.contains('hidden'),
+     'the tour came back after being dismissed');
+});
+
+check('a browser that blocks storage still loads the page', () => {
+  sandbox.localStorage.store = null;            // every access now throws
+  G.maybeOpenTour();                            // must not throw
+  G.closeTour();                                // must not throw
+  sandbox.localStorage.store = {};
+});
+
+/* ---------------- panes ---------------- */
+console.log('\nthe three tabs:');
+check('showTab drives three panes, not two', () => {
+  G.showTab('print');
+  ok(!document.getElementById('panePrint').classList.contains('hidden'),
+     'the print-it-yourself pane did not open');
+  ok(document.getElementById('paneMap').classList.contains('hidden'), 'map still shown');
+  ok(document.getElementById('panePrev').classList.contains('hidden'), 'preview still shown');
+  G.showTab('map');
+  ok(!document.getElementById('paneMap').classList.contains('hidden'), 'map did not come back');
+  ok(document.getElementById('panePrint').classList.contains('hidden'), 'print pane stuck open');
+});
+
+check('the old boolean showTab calls still work', () => {
+  // buildPreview and the resize handler call showTab(true)
+  G.showTab(true);
+  ok(!document.getElementById('panePrev').classList.contains('hidden'), 'showTab(true)');
+  G.showTab(false);
+  ok(!document.getElementById('paneMap').classList.contains('hidden'), 'showTab(false)');
+});
+
+/* ---------------- the detail panel is gone but its settings are not --------- */
+check('removing the Detail panel did not change what gets built', () => {
+  eq(G.DETAIL.roofs, 'all', 'roof mode changed');
+  eq(G.DETAIL.lod, '2', 'LOD changed');
+  eq(G.DETAIL.source, 'overture', 'data source changed');
+  eq(G.DETAIL.ridge, 0.98, 'ridge fraction changed');
+  const cmd = G.buildCmd();
+  ok(/--roofs all/.test(cmd), 'the command lost --roofs: ' + cmd);
+  ok(/--max-ridge-frac 0.98/.test(cmd), 'the command lost the ridge fraction: ' + cmd);
+  ok(!/--source osm|--lod 1/.test(cmd), 'the command picked up a non-default: ' + cmd);
+});
+
+/* ---------------- camera ---------------- */
+console.log('\nthe preview camera:');
+function pointer(el, type, id, x, y, extra) {
+  el.dispatch(type, Object.assign({ pointerId: id, clientX: x, clientY: y,
+    button: 0, shiftKey: false, preventDefault() {} }, extra || {}));
+}
+check('one finger orbits', () => {
+  const g = G.glInit();
+  const cv = document.getElementById('gl');
+  const az0 = g.cam.az, el0 = g.cam.el;
+  pointer(cv, 'pointerdown', 1, 100, 100);
+  pointer(cv, 'pointermove', 1, 160, 130);
+  pointer(cv, 'pointerup', 1, 160, 130);
+  ok(g.cam.az !== az0 || g.cam.el !== el0, 'dragging did not orbit');
+});
+check('two fingers pan and pinch', () => {
+  const g = G.glInit();
+  const cv = document.getElementById('gl');
+  g.cam.tgt.set(0, 0, 0); g.cam.r = 400;
+  const r0 = g.cam.r;
+  pointer(cv, 'pointerdown', 1, 100, 100);
+  pointer(cv, 'pointerdown', 2, 200, 100);      // second finger -> pinch
+  pointer(cv, 'pointermove', 1, 60, 140);       // spread apart and slide down
+  pointer(cv, 'pointermove', 2, 240, 140);
+  ok(g.cam.r < r0, 'spreading two fingers did not zoom in: ' + g.cam.r);
+  ok(g.cam.tgt.x !== 0 || g.cam.tgt.z !== 0, 'two fingers did not pan');
+  pointer(cv, 'pointerup', 2, 240, 140);
+  pointer(cv, 'pointerup', 1, 60, 140);
+});
+check('right-drag pans without spinning', () => {
+  const g = G.glInit();
+  const cv = document.getElementById('gl');
+  g.cam.tgt.set(0, 0, 0);
+  const az0 = g.cam.az;
+  pointer(cv, 'pointerdown', 3, 100, 100, { button: 2 });
+  pointer(cv, 'pointermove', 3, 150, 100);
+  pointer(cv, 'pointerup', 3, 150, 100);
+  eq(g.cam.az, az0, 'a right-drag rotated the model instead of panning');
+  ok(g.cam.tgt.x !== 0 || g.cam.tgt.z !== 0, 'a right-drag did not pan');
+});
+check('lifting one of two fingers does not make the model jump', () => {
+  const g = G.glInit();
+  const cv = document.getElementById('gl');
+  pointer(cv, 'pointerdown', 1, 100, 100);
+  pointer(cv, 'pointerdown', 2, 300, 100);
+  const az0 = g.cam.az;
+  pointer(cv, 'pointerup', 2, 300, 100);        // drop to one finger
+  pointer(cv, 'pointermove', 1, 102, 100);      // a 2px twitch
+  ok(Math.abs(g.cam.az - az0) < 0.1,
+     'the camera jumped when the second finger lifted: ' + (g.cam.az - az0));
+  pointer(cv, 'pointerup', 1, 102, 100);
+});
+check('the canvas claims its own touch gestures', () => {
+  G.glInit();
+  eq(document.getElementById('gl').style.touchAction, 'none',
+     'without touch-action:none the browser scrolls the page instead');
+});
+
+/* ---------------- results ---------------- */
 
 check('the exact preview trusts the colour in the 3MF over the panel', () => {
   // serve.py reads the colour back off basematerials. If the file and the

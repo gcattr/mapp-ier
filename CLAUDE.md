@@ -382,10 +382,20 @@ object count, while the print-volume check still measures them.
 
 **The picker is a stock list, not a colour wheel.** It used to be an
 `<input type="color">` per layer, which let a buyer choose any of 16 million
-colours, approximately nine of which the shop can print. It is now a `<select>`
-of the stocked filaments, grouped by finish. A native `<select>` and not a
-custom swatch grid on purpose: on a phone it opens as a full-screen list with
-real touch targets, which nothing hand-rolled matches.
+colours, approximately nine of which the shop can print. It is now a chip
+showing the current colour, which opens an inline grid of the stocked
+filaments grouped by finish.
+
+**Every colour is shown as a colour.** A list of 18 names asks a buyer to know
+what "Nardo Gray" looks like, which nobody does. Each option is a swatch plus
+its name, and the chip carries the swatch too, so the panel can be read at a
+glance. The grid is inline and toggled open rather than a floating menu: no
+positioning to get wrong near the bottom of a phone screen, and it cannot open
+off-screen. One grid open at a time, and picking closes it — one tap, done.
+
+`.ggrid` uses `repeat(3, minmax(0, 1fr))`, not `repeat(3, 1fr)`. Plain `1fr` is
+`minmax(auto, 1fr)`, so a long name like "Bambu Green" widens its own column
+and the swatches stop lining up.
 
 **`col` is derived, never set.** `pick` (layer -> filament key) is the buyer's
 order; `col` is only its rendering, recomputed by `colFromPick()`. Setting a
@@ -397,18 +407,88 @@ colour back off `basematerials` and sends it with the mesh, and
 `buildExactScene()` prefers that over the panel's own idea. If the two ever
 disagree the file wins, because the file is what prints.
 
+**The preview is honest about what it is.** The disclaimer used to read "the
+same geometry the slicer receives", which is true and still misleading: it is
+the real geometry, but it is not a photograph of the finished print. Layer
+lines, gloss, and how a matte filament catches the light all change how it
+looks in the hand, and a screen cannot show any of them. Say so, or the first
+complaint is that the model "doesn't look like the picture".
+
+**Three tabs, and `showTab` takes a name.** Map / 3D preview / Print it
+yourself. It used to take a boolean, which stopped working the moment there
+were three panes; it still accepts `true`/`false` because `buildPreview()` and
+the resize handler call it that way.
+
+**The camera orbits, pans and pinches.** One finger spins, two fingers slide
+and pinch, right-drag (or shift-drag) slides on a mouse. Pointers are tracked
+in a `Map` rather than a single `drag`, for two reasons that are both bugs if
+you get them wrong: a second finger landing mid-drag has to upgrade the gesture
+instead of being ignored, and lifting one of two fingers must continue from
+where the remaining finger is — otherwise the model jumps by the distance
+between them. The canvas also sets `touch-action: none`; without it the browser
+scrolls the page and on a phone the model simply will not move.
+
 **The server-side job is not cancelled.** Starting a new preview abandons the old
 job rather than stopping it; it runs to completion, holding a slot in the
 6-job cap. There is no `/api/cancel`.
+
+## The walkthrough
+
+Six steps on first visit, skippable at every one, and shown once —
+`localStorage['m2m.tour.v1']`, with "? Help" in the tab bar to bring it back.
+Every storage access is wrapped in try/catch: a tour that cannot be remembered
+is a papercut, a page that will not load is not.
+
+It is written for someone who has never used anything like this — an Etsy
+buyer, on a phone, who wants a model of their street. **No jargon.** A test
+fails the build if the copy contains "3mf", "filament slot", "AMS", "exporter",
+"STL", "LOD", "CLI", "terminal" or "command line". Two more tests pin the
+things that cost money if they are missed:
+
+- the size step must say **the same size you picked on Etsy** — if it does not
+  match the order, the buyer gets a model they did not pay for;
+- the preview step must say it takes **minutes** *and* that you do not have to
+  wait, or buyers sit watching a spinner believing the order depends on it.
+
+`maybeOpenTour()` is called last in the startup sequence, so a first-time
+visitor sees a drawn page behind the card rather than a blank one. There is a
+test that the startup sequence actually calls it: the function existed, was
+correct, and was never wired up, so nobody would have seen the tour at all.
+
+## What is deliberately not in the console
+
+- **A "Detail" panel** (data source, LOD, roof mode, ridge height). A buyer
+  ordering a souvenir has no opinion about LOD2 versus LOD1, and every extra
+  control was one more way to order something they did not mean. The values
+  live in the `DETAIL` constant and are exactly what the panel defaulted to, so
+  nothing about the output changed. Change them there, not in `buildCmd()`.
+- **"Open exported 3MF"**. It was for the seller, not the buyer, and it sat in
+  the tab bar of a customer-facing page. `openExact()` and `renderExact()` are
+  still in the source but nothing reaches them — dead like the tile path.
+- **The cover colour.** Not a buyer choice; see Filaments.
+
+## Print it yourself
+
+A third tab points at the tools that hand you a file, for visitors who have a
+printer at home: MiniSkyline, TerraPrinter, TrailPrint3D, Topo Trail,
+TouchTerrain, Touch Mapper, Terrain2STL and Blosm for Blender. All eight URLs
+were opened and confirmed to resolve to the right site. Sending someone
+elsewhere costs nothing and beats a bounce; the page says plainly that none of
+them are endorsed.
 
 ## Mobile
 
 Buyers arrive from an Etsy listing, which is overwhelmingly a phone, so the
 narrow layout is the common case and not an afterthought. Two breakpoints:
 940 px stacks the map above the panel; 560 px is the phone pass — 44 px touch
-targets (Apple's minimum), a shorter map that still leaves room to aim a tile,
-and **16 px font on the filament `<select>`**, because iOS silently zooms the
-whole page when a focused control is smaller than that.
+targets (Apple's minimum) on the chips, swatches and tour buttons, a two-column
+swatch grid instead of three, and a shorter map that still leaves room to aim a
+tile.
+
+Verified in a real browser at desktop width: tour, picker, tab switching and
+the copied command. The 560 px block could not be exercised — the window would
+not resize on this display — so it was checked by reading the parsed
+stylesheet back out of the browser and confirming all 19 rules survived.
 
 ## Testing
 
@@ -431,7 +511,7 @@ a call to a function that no longer exists passes cleanly. This bit twice
 `test_console.js` is that harness. No dependencies, no network, no browser:
 
 ```bash
-node test_console.js                    # 26 checks, exit 0 = clean
+node test_console.js                    # 43 checks, exit 0 = clean
 node test_console.js old-console.html   # point it at an older copy
 ```
 

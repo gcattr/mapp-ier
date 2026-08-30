@@ -156,12 +156,67 @@ select{width:auto;min-width:118px;font-family:var(--sans)}
   border:1px solid var(--rule);border-radius:2px;transition:opacity .15s;
   flex-wrap:wrap}
 .film.off{opacity:.42}
-.sw{width:24px;height:24px;border-radius:2px;border:1px solid rgba(0,0,0,.28);
-  flex:none;box-shadow:inset 0 0 0 1px rgba(255,255,255,.35)}
-.fsel{flex:none;width:100%;order:9;font:inherit;font-size:12.5px;padding:7px 8px;
-  min-height:38px;border:1px solid var(--rule);border-radius:2px;background:#fff;
-  color:var(--ink)}
-.fsel:disabled{opacity:.5}
+.dot,.cdot,.odot{border-radius:2px;border:1px solid rgba(0,0,0,.28);flex:none;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.35)}
+/* the current colour, as a colour: a name alone asks the buyer to know what
+   "Nardo Gray" looks like, which nobody does */
+.chip{order:9;width:100%;display:flex;align-items:center;gap:8px;font:inherit;
+  font-size:12.5px;min-height:38px;padding:6px 9px;background:#fff;cursor:pointer;
+  border:1px solid var(--rule);border-radius:2px;color:var(--ink);text-align:left}
+.chip:hover{border-color:#9BB0C0}
+.chip:disabled{opacity:.5;cursor:default}
+.cdot{width:20px;height:20px}
+.chip .cnm{flex:1}
+.chip .caret{color:var(--ink-40);font-size:11px}
+.grid{order:10;width:100%;background:#F7F9FA;border:1px solid var(--rule);
+  border-top:0;border-radius:0 0 2px 2px;padding:8px 9px 10px}
+.ghead{font-family:var(--cond);font-size:10px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--ink-40);margin:6px 0 5px}
+.ghead:first-child{margin-top:0}
+.ggrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
+.opt{display:flex;align-items:center;gap:6px;font:inherit;font-size:11.5px;
+  padding:6px;min-height:38px;background:#fff;border:1px solid var(--rule);
+  border-radius:2px;cursor:pointer;color:var(--ink);text-align:left}
+.opt:hover{border-color:#9BB0C0}
+.opt.on{border-color:#2E6FB7;box-shadow:0 0 0 1px #2E6FB7}
+.odot{width:16px;height:16px}
+.opt .onm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* --- the print-it-yourself sheet --- */
+.sheet{overflow-y:auto;background:var(--sheet)}
+.sheetin{max-width:640px;margin:0 auto;padding:26px 22px 40px}
+.sheetin h3{font-size:17px;margin:0 0 10px}
+.sheetin p{font-size:13.5px;line-height:1.6;color:var(--ink-70);margin:0 0 14px}
+.sheetin .fine{font-size:12px;color:var(--ink-40);margin-top:18px}
+.links{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+.links li{padding:10px 12px;background:#fff;border:1px solid var(--rule);
+  border-radius:2px}
+.links a{font-weight:600;font-size:13.5px;color:#2E6FB7;text-decoration:none}
+.links a:hover{text-decoration:underline}
+.links span{display:block;font-size:12px;color:var(--ink-40);margin-top:2px}
+
+/* --- the walkthrough --- */
+.tour{position:fixed;inset:0;z-index:900;background:rgba(14,23,32,.62);
+  display:flex;align-items:center;justify-content:center;padding:18px}
+.tourcard{background:#fff;border-radius:4px;max-width:430px;width:100%;
+  padding:26px 24px 18px;box-shadow:0 24px 60px rgba(0,0,0,.32);text-align:center}
+.tourart{font-size:40px;line-height:1;margin-bottom:12px}
+.tourcard h3{font-size:19px;margin:0 0 12px;letter-spacing:-.01em}
+#tourBody{font-size:14px;line-height:1.62;color:var(--ink-70);text-align:left}
+#tourBody p{margin:0 0 11px}
+#tourBody .warn{background:#FFF6E3;border-left:3px solid #E0A030;
+  padding:9px 11px;border-radius:2px;color:var(--ink)}
+.tournav{display:flex;align-items:center;gap:8px;margin-top:18px;
+  padding-top:14px;border-top:1px solid var(--rule)}
+.tournav button{font:inherit;font-size:13px;padding:9px 16px;min-height:40px;
+  border-radius:2px;cursor:pointer;border:1px solid var(--ink);
+  background:var(--ink);color:#fff}
+.tournav .ghost{background:transparent;color:var(--ink-40);border-color:transparent}
+.tournav .ghost:hover{color:var(--ink)}
+.tournav #tourNext{margin-left:auto}
+.dots{display:flex;gap:5px;flex:1;justify-content:center}
+.dots i{width:6px;height:6px;border-radius:50%;background:#CBD5DD}
+.dots i.on{background:#2E6FB7}
 .film .nm{flex:1;font-size:13px;font-weight:500}
 .film .slot{font-family:var(--mono);font-size:10.5px;background:#E8EEF2;
   border:1px solid var(--rule);border-radius:2px;padding:1px 5px}
@@ -205,8 +260,16 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
   section{padding:12px 14px}
   .film{gap:8px;padding:10px}
   .film .note{display:none}
-  .fsel{min-height:44px;font-size:16px}   /* 16px stops iOS zooming on focus */
+  .chip{min-height:44px;font-size:14px}
+  .opt{min-height:44px;font-size:12px}
+  .ggrid{grid-template-columns:repeat(2,minmax(0,1fr))}
   input[type=checkbox]{width:22px;height:22px}
+  .tourcard{padding:22px 18px 14px}
+  .tourart{font-size:34px}
+  .tourcard h3{font-size:17px}
+  #tourBody{font-size:13.5px}
+  .tournav button{padding:10px 14px;min-height:44px}
+  .sheetin{padding:18px 16px 32px}
   .seg button{min-height:44px}
   pre{font-size:11.5px;max-height:96px}
   #copy{width:100%;min-height:44px}
@@ -229,16 +292,30 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
   </div>
 </header>
 
+<div class="tour hidden" id="tour" role="dialog" aria-modal="true"
+     aria-labelledby="tourTitle">
+  <div class="tourcard">
+    <div class="tourart" id="tourArt" aria-hidden="true"></div>
+    <h3 id="tourTitle"></h3>
+    <div id="tourBody"></div>
+    <div class="tournav">
+      <button id="tourSkip" class="ghost">Skip</button>
+      <span class="dots" id="tourDots"></span>
+      <button id="tourBack" class="ghost">Back</button>
+      <button id="tourNext">Next</button>
+    </div>
+  </div>
+</div>
+
 <div class="main">
   <div class="left">
     <div class="tabs">
       <button id="tabMap" class="on">Map</button>
       <button id="tabPrev">3D preview</button>
+      <button id="tabPrint">Print it yourself</button>
       <button id="btnRefresh" class="hidden">↻ Rebuild</button>
-
-      <button id="btnLoad3mf" class="hidden">Open exported 3MF</button>
-      <input type="file" id="file3mf" accept=".3mf" multiple class="hidden">
       <span class="grow"></span>
+      <button id="btnHelp" title="Show the walkthrough again">? Help</button>
       <span class="status" id="prevStatus"></span>
     </div>
     <div class="viewport">
@@ -251,12 +328,44 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
         </div>
       </div>
       <div id="vtmap" aria-hidden="true"></div>
+      <div class="sheet hidden" id="panePrint">
+        <div class="sheetin">
+          <h3>Want the 3D file instead?</h3>
+          <p>This page is for ordering a printed tile from the shop — you pick the
+            place and the colours, and it arrives finished. If you have a 3D
+            printer at home and would rather make one yourself, these do a
+            similar job and hand you a file:</p>
+          <ul class="links">
+            <li><a href="https://miniskyline.com" target="_blank" rel="noopener">MiniSkyline</a>
+              <span>City skylines as a printable block.</span></li>
+            <li><a href="https://terraprinter.com" target="_blank" rel="noopener">TerraPrinter</a>
+              <span>Terrain tiles from anywhere on earth.</span></li>
+            <li><a href="https://trailprint3d.com" target="_blank" rel="noopener">TrailPrint3D</a>
+              <span>Hikes and trails as 3D terrain.</span></li>
+            <li><a href="https://topotrail.com" target="_blank" rel="noopener">Topo Trail</a>
+              <span>Topographic route models.</span></li>
+            <li><a href="https://touchterrain.geol.iastate.edu" target="_blank" rel="noopener">TouchTerrain</a>
+              <span>Free, from Iowa State — terrain only, very configurable.</span></li>
+            <li><a href="https://touch-mapper.org" target="_blank" rel="noopener">Touch Mapper</a>
+              <span>Free tactile street maps, built for accessibility.</span></li>
+            <li><a href="https://jthatch.com/Terrain2STL" target="_blank" rel="noopener">Terrain2STL</a>
+              <span>Free and quick, terrain elevation only.</span></li>
+            <li><a href="https://prochitecture.gumroad.com/l/blosm" target="_blank" rel="noopener">Blosm for Blender</a>
+              <span>A Blender add-on. The most control, and the steepest learning curve.</span></li>
+          </ul>
+          <p class="fine">Not affiliated with any of them, and none of them are
+            checked or endorsed here — they are just the tools that come up when
+            people ask. Buildings, terrain and water vary a lot between them.</p>
+        </div>
+      </div>
       <div class="stage hidden" id="panePrev">
         <canvas id="gl"></canvas>
         <div class="hud hidden" id="prevHud"></div>
         <div class="disclaimer" id="prevDisclaimer">
-          <strong>Exact model.</strong> Built by map2model.py — the same geometry
-          the slicer receives.
+          <strong>Exact model.</strong> This is the real geometry, not a sketch —
+          but it is not a photograph of the finished print. Colours are shown on
+          a screen, and layer lines, gloss and how a matte filament catches the
+          light all change how it looks in the hand.
         </div>
         <div class="working hidden" id="prevWorking">
           <span class="dot"></span><span id="prevWorkingText">Loading roofs and
@@ -270,12 +379,13 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
         </div>
         <div class="legend hidden" id="prevLegend"></div>
         <div class="overlay" id="prevOverlay">
-          <p id="prevMsg">Build a preview from live OpenStreetMap data for this tile.
-            Drag to orbit, scroll to zoom.<br><br><small>Fetching can take a good while —
-            usually under a minute, occasionally several. It has no bearing on how long
-            the export takes.</small><br><br><small>Already ran the command? <b>Open
-            exported 3MF</b> above shows the actual file — the exact model the printer
-            gets, taper, roofs and all.</small></p>
+          <p id="prevMsg">See your tile in 3D before you order.
+            <br><br><small><b>This takes a few minutes</b> — usually two to five,
+            sometimes longer for a big city. You do not have to wait for it: your
+            colours and your code are already set, and the preview changes
+            nothing about them.</small>
+            <br><br><small>Drag to spin it · two fingers (or right-drag) to
+            slide · pinch or scroll to zoom.</small></p>
           <button id="btnBuild">Build preview</button>
         </div>
       </div>
@@ -325,31 +435,6 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
         </div></div>
       <div class="films" id="films"></div>
       <div class="hint" id="filmHint"></div>
-    </section>
-
-    <section>
-      <h2>Detail</h2>
-      <div class="row"><label class="t" for="source">Data</label>
-        <select id="source">
-          <option value="overture">Overture — parts &amp; roofs</option>
-          <option value="osm">OpenStreetMap — outlines only</option>
-        </select></div>
-      <div class="row"><label class="t" for="lod">Geometry</label>
-        <select id="lod">
-          <option value="2">LOD2 — building parts</option>
-          <option value="1">LOD1 — one prism each</option>
-        </select></div>
-      <div class="row"><label class="t" for="roofs">Roofs</label>
-        <select id="roofs">
-          <option value="all" selected>All — every roof shape</option>
-          <option value="safe">Safe — only ridges with a known direction</option>
-          <option value="symmetric">Symmetric only — domes and cones</option>
-          <option value="none">Flat tops</option>
-        </select></div>
-      <div class="row"><label class="t" for="ridge">Ridge roof height</label>
-        <input type="range" id="ridge" min="0.2" max="0.98" step="0.01" value="0.98">
-        <span class="val" id="vRidge">0.98</span></div>
-      <div class="hint" id="detailHint"></div>
     </section>
 
     <section>
@@ -416,6 +501,14 @@ const FILAMENTS = {
 };
 const FIL_GROUPS = ['PLA Basic', 'PLA Matte'];
 
+/* Fixed build settings. These were a "Detail" panel with four controls -- data
+   source, LOD, roof mode, ridge height. A buyer ordering a souvenir has no
+   opinion about LOD2 versus LOD1, and every extra control was one more way to
+   order something they did not mean. The values here are exactly what that
+   panel defaulted to, so nothing about the output changed when it went away.
+   They are still real settings: change them here, not in buildCmd. */
+const DETAIL = {source:'overture', lod:'2', roofs:'all', ridge:0.98};
+
 /* Objects leave the 3MF in this order and a slicer assigns filament slots in
    the same order, so the panel lists them that way. The frame is here because
    the buyer sees it -- it is the border of the finished tile. The cover is NOT:
@@ -454,15 +547,27 @@ const shown = k => mono ? MONO_COL : (col[k] || '#9BA3A8');
    filament renders washed out. Always build material colours through FIL(). */
 const FIL = hex => new THREE.Color(hex).convertSRGBToLinear();
 
-/* Options for one picker, grouped by finish. A <select> rather than a swatch
-   grid on purpose: on a phone the native picker is a full-screen list with
-   real-sized touch targets, which no custom dropdown matches. */
-function filOptions(sel){
+/* The swatch grid for one layer. Every colour is shown as the colour, with its
+   name beside it -- a plain <select> of 18 names asks a buyer to know what
+   "Nardo Gray" looks like, which nobody does. The grid is inline and toggled
+   open rather than a floating menu: no positioning to get wrong near the
+   bottom of a phone screen, and it cannot open off-screen. */
+let openPicker = null;      // which layer's grid is expanded, if any
+/* Open/close by name. The handlers below go through these too, so there is one
+   path that changes which palette is showing. */
+function openPickerFor(layer){ openPicker = layer; drawFilms(); }
+function closePicker(){ openPicker = null; drawFilms(); }
+
+function filGrid(layer){
+  const cur = pick[layer];
   return FIL_GROUPS.map(g=>{
     const rows = Object.entries(FILAMENTS).filter(([,f])=>f.grp===g)
-      .map(([key,f])=>`<option value="${key}"${key===sel?' selected':''}>${f.nm}</option>`)
-      .join('');
-    return `<optgroup label="${g}">${rows}</optgroup>`;
+      .map(([key,f])=>`<button type="button" class="opt${key===cur?' on':''}"
+           data-pickfor="${layer}" data-key="${key}"
+           aria-pressed="${key===cur}" title="${g} ${f.nm}">
+           <span class="odot" style="background:${f.hex}"></span>
+           <span class="onm">${f.nm}</span></button>`).join('');
+    return `<div class="ghead">${g}</div><div class="ggrid">${rows}</div>`;
   }).join('');
 }
 
@@ -476,28 +581,124 @@ function drawFilms(){
               : (f.k==='water'&&wif) ? 'frame plate'
               : f.k==='frame' ? 'frame plate' : 'slot '+slot;
     const fil = FILAMENTS[pick[f.k]] || {nm:'?', hex:'#888888'};
+    const open = openPicker===f.k;
     return `<div class="film ${on[f.k]?'':'off'}">
-      <span class="sw" style="background:${mono?MONO_COL:fil.hex}"
-            aria-hidden="true"></span>
       <span class="nm">${f.nm}</span><span class="slot">${tag}</span>
       <input type="checkbox" ${on[f.k]?'checked':''} ${f.locked?'disabled':''}
              data-film="${f.k}" aria-label="Include ${f.nm}">
-      <select class="fsel" data-fil="${f.k}" ${on[f.k]?'':'disabled'}
-              aria-label="${f.nm} filament">${filOptions(pick[f.k])}</select>
+      <button type="button" class="chip" data-open="${f.k}"
+              ${on[f.k]?'':'disabled'} aria-expanded="${open}">
+        <span class="cdot" style="background:${mono?MONO_COL:fil.hex}"></span>
+        <span class="cnm">${fil.nm}</span>
+        <span class="caret">${open?'▴':'▾'}</span>
+      </button>
+      <div class="grid ${open?'':'hidden'}">${open?filGrid(f.k):''}</div>
     </div>`;
   }).join('');
   $('films').querySelectorAll('[data-film]').forEach(cb=>
     cb.addEventListener('change', ()=>{ on[cb.dataset.film]=cb.checked;
+      if(!cb.checked && openPicker===cb.dataset.film) openPicker=null;
       drawFilms(); sync(); repaint(); }));
-  $('films').querySelectorAll('[data-fil]').forEach(sel=>
-    sel.addEventListener('change', ()=>{
-      pick[sel.dataset.fil] = sel.value; colFromPick();
+  $('films').querySelectorAll('[data-open]').forEach(b=>
+    b.addEventListener('click', ()=>{
+      // one grid open at a time, so the panel never becomes a wall of swatches
+      openPicker = openPicker===b.dataset.open ? null : b.dataset.open;
+      drawFilms(); }));
+  $('films').querySelectorAll('[data-pickfor]').forEach(b=>
+    b.addEventListener('click', ()=>{
+      pick[b.dataset.pickfor] = b.dataset.key; colFromPick();
+      openPicker = null;                    // picking closes it: one tap, done
       drawFilms(); sync(); repaint(); }));
 }
 $('modeFull').addEventListener('click',()=>{mono=false;
   $('modeFull').classList.add('on');$('modeMono').classList.remove('on');drawFilms();repaint();});
 $('modeMono').addEventListener('click',()=>{mono=true;
   $('modeMono').classList.add('on');$('modeFull').classList.remove('on');drawFilms();repaint();});
+
+/* ---------------- the walkthrough ----------------
+   Written for someone who has never used anything like this: an Etsy buyer, on
+   a phone, who wants a model of their street. No jargon, no mention of 3MF,
+   filament slots or the exporter. Six steps, skippable at every one, and shown
+   once -- coming back to a tour you have already read is friction, so it is
+   remembered in localStorage and reachable again from "? Help".            */
+const TOUR = [
+  {t:'Make a model of anywhere you like',
+   art:'\uD83C\uDFD9\uFE0F',
+   b:`<p>Six quick steps. It takes about a minute, and nothing here can go
+      wrong — nothing is ordered or charged from this page.</p>
+      <p>At the end you copy a short code and paste it into your Etsy order.
+      That code is how we know which place to print for you.</p>`},
+  {t:'1 · Find your place',
+   art:'\uD83D\uDD0D',
+   b:`<p>Type a place in the <b>search box</b> on the map — an address, a
+      postcode, a city — and press <b>Find</b>.</p>
+      <p>Or just drag the map around with your finger until you can see where
+      you want.</p>`},
+  {t:'2 · Choose your square',
+   art:'\u2B1C',
+   b:`<p>The blue square is what gets printed. Drag the map to move it.</p>
+      <p>Use <b>Tile width</b> to say how much of the city fits inside the
+      square. A smaller number zooms in on a few streets; a bigger number
+      takes in the whole downtown but makes each building smaller.</p>`},
+  {t:'3 · Pick the size you ordered',
+   art:'\uD83D\uDCCF',
+   b:`<p>Under <b>Print size</b>, choose <b>the same size you picked on
+      Etsy</b> — Small, Medium or Large.</p>
+      <p class="warn">This one matters. If it does not match your order, the
+      model will not be the size you paid for.</p>`},
+  {t:'4 · Choose your colours',
+   art:'\uD83C\uDFA8',
+   b:`<p>Tap a colour button to open the palette, then tap the colour you
+      want. There is one for the ground, the water, the parks, the roads, the
+      buildings and the border.</p>
+      <p>These are real filament colours, so what you pick is what gets
+      printed. Happy with the defaults? Leave them alone.</p>`},
+  {t:'5 · Have a look first (optional)',
+   art:'\uD83D\uDC41\uFE0F',
+   b:`<p>The <b>3D preview</b> tab builds your actual model so you can spin it
+      around before ordering.</p>
+      <p class="warn">It takes a few minutes — usually two to five. You do not
+      have to wait for it. Your colours and your code are ready either way.</p>`},
+  {t:'6 · Copy the code into your order',
+   art:'\uD83D\uDCCB',
+   b:`<p>Press <b>Copy</b> at the bottom, then paste it into the
+      <b>personalisation</b> box on your Etsy order.</p>
+      <p>That is everything. We will print it and post it to you.</p>`},
+];
+let tourAt = 0;
+const TOUR_SEEN = 'm2m.tour.v1';
+
+function drawTour(){
+  const st = TOUR[tourAt];
+  $('tourArt').textContent = st.art;
+  $('tourTitle').textContent = st.t;
+  $('tourBody').innerHTML = st.b;
+  $('tourDots').innerHTML = TOUR.map((_,i)=>
+    `<i class="${i===tourAt?'on':''}"></i>`).join('');
+  $('tourBack').classList.toggle('hidden', tourAt===0);
+  $('tourNext').textContent = tourAt===TOUR.length-1 ? 'Start' : 'Next';
+  $('tourSkip').classList.toggle('hidden', tourAt===TOUR.length-1);
+}
+function openTour(at){
+  tourAt = at || 0; drawTour();
+  $('tour').classList.remove('hidden');
+}
+function closeTour(){
+  $('tour').classList.add('hidden');
+  // localStorage throws outright in some privacy modes; a tour that cannot be
+  // remembered is a papercut, a page that will not load is not.
+  try{ localStorage.setItem(TOUR_SEEN,'1'); }catch(e){}
+}
+function tourNext(){
+  if(tourAt >= TOUR.length-1) return closeTour();
+  tourAt++; drawTour();
+}
+function tourBack(){ if(tourAt>0){ tourAt--; drawTour(); } }
+function maybeOpenTour(){
+  let seen = false;
+  try{ seen = localStorage.getItem(TOUR_SEEN)==='1'; }catch(e){}
+  if(!seen) openTour(0);
+}
 
 /* ---------------- square tile ---------------- */
 let centre = {lat:43.6455, lng:-79.3860}, spanM = 1600;
@@ -623,7 +824,7 @@ function widenToPrintable(pts, minW){
   return pts.map(p=>[cx+(p[0]-cx)*k, cy+(p[1]-cy)*k]);
 }
 const S = () => ({
-  zex:+$('zex').value, bscale:+$('bscale').value, ridge:+$('ridge').value,
+  zex:+$('zex').value, bscale:+$('bscale').value, ridge:DETAIL.ridge,
   fw:FRAME.fw, fd:FRAME.fd, fc:FRAME.fc, ff:FRAME.ff
 });
 
@@ -636,10 +837,9 @@ function buildCmd(){
   if(v.bscale!==1) a.push(`--building-scale ${v.bscale.toFixed(1)}`);
   if(!$('terrain').checked) a.push('--no-terrain');
   ['water','greenery','roads','buildings'].forEach(k=>{ if(!on[k]) a.push('--no-'+k); });
-  if($('source').value!=='overture') a.push('--source osm');
-  if($('lod').value!=='2')           a.push('--lod 1');
-  if($('roofs').value!=='all') a.push(`--roofs ${$('roofs').value}`);
-  else a.push('--roofs all');
+  if(DETAIL.source!=='overture') a.push('--source osm');
+  if(DETAIL.lod!=='2')           a.push('--lod 1');
+  a.push(`--roofs ${DETAIL.roofs}`);
   a.push(`--max-ridge-frac ${v.ridge}`);
   a.push('--split', '--box');
   a.push('--water-in-frame');
@@ -670,7 +870,6 @@ function sync(){
   $('vSpan').textContent   = spanM+' m';
   $('vZex').textContent    = v.zex.toFixed(1)+'×';
   $('vBscale').textContent = v.bscale.toFixed(1)+'×';
-  $('vRidge').textContent  = v.ridge.toFixed(2);
 
   const mpmm = spanM/sizeMM, outer = sizeMM + 2*v.fc + 2*v.fw;
   $('rTile').textContent  = (spanM/1000).toFixed(2)+' km square';
@@ -710,11 +909,11 @@ function sync(){
     : (wif ? `Land plate uses ${n} filament${n>1?'s':''}. Water prints with the frame.`
            : `Land plate uses ${n} filament${n>1?'s':''}.`);
 
-  $('detailHint').textContent = {
+  const _detailHint = {
     symmetric:'Domes, cones and pyramids only. Built from the footprint alone, so nothing can face the wrong way.',
     safe:'Adds gabled and hipped roofs, but only where the data says which way they run.',
     all:'Includes ridge roofs whose direction is guessed. Near-square buildings may point the wrong way.',
-    none:'Every building gets a flat top.'}[$('roofs').value];
+    none:'Every building gets a flat top.'}[DETAIL.roofs];
 
   $('out-cmd').innerHTML = paint(buildCmd());
 }
@@ -763,17 +962,67 @@ function glInit(){
   function place(){ const ce=Math.cos(cam.el);
     camera.position.set(cam.tgt.x+cam.r*ce*Math.cos(cam.az), cam.tgt.y+cam.r*Math.sin(cam.el),
       cam.tgt.z+cam.r*ce*Math.sin(cam.az)); camera.lookAt(cam.tgt); }
-  let drag=null;
-  cv.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY};cv.setPointerCapture(e.pointerId);});
-  cv.addEventListener('pointermove',e=>{ if(!drag)return;
-    cam.az-=(e.clientX-drag.x)*0.006;
-    cam.el=Math.max(0.06,Math.min(1.5,cam.el+(e.clientY-drag.y)*0.005));
-    drag={x:e.clientX,y:e.clientY}; place(); render(); });
-  const stop=()=>{drag=null;};
-  cv.addEventListener('pointerup',stop); cv.addEventListener('pointercancel',stop);
+  /* Orbit, pan and zoom. One finger spins, two fingers slide and pinch, and on
+     a mouse the right button (or shift) slides. Pointer events are tracked in a
+     map rather than a single `drag`, because a second finger landing during a
+     one-finger drag must upgrade the gesture instead of being ignored -- and
+     because a pointercancel for finger 2 must not kill finger 1. */
+  const pts=new Map(); let mode=null, last=null, lastDist=0;
+  const clampR = r => Math.max(50, Math.min(3000, r));
+  /* Pan moves the look-at point across the ground plane, along the screen axes,
+     scaled by distance so the model tracks the finger at any zoom. */
+  function pan(dx,dy){
+    const k=cam.r*0.0016;
+    const ca=Math.cos(cam.az), sa=Math.sin(cam.az);
+    cam.tgt.x += ( sa*dx - ca*dy)*k;
+    cam.tgt.z += (-ca*dx - sa*dy)*k;
+    cam.tgt.y  = Math.max(-200, Math.min(400, cam.tgt.y));
+  }
+  const centreOf=()=>{ let x=0,y=0; for(const p of pts.values()){x+=p.x;y+=p.y;}
+    return {x:x/pts.size, y:y/pts.size}; };
+  const spread=()=>{ const a=[...pts.values()];
+    return a.length<2 ? 0 : Math.hypot(a[0].x-a[1].x, a[0].y-a[1].y); };
+
+  cv.addEventListener('pointerdown',e=>{
+    cv.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    mode = pts.size>1 ? 'pinch'
+         : (e.button===2 || e.shiftKey) ? 'pan' : 'orbit';
+    last=centreOf(); lastDist=spread();
+  });
+  cv.addEventListener('pointermove',e=>{
+    if(!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    const c=centreOf();
+    if(mode==='pinch'){
+      const d=spread();
+      if(lastDist>0 && d>0) cam.r=clampR(cam.r*(lastDist/d));
+      lastDist=d;
+      pan(c.x-last.x, c.y-last.y);           // two fingers also slide
+    } else if(mode==='pan'){
+      pan(c.x-last.x, c.y-last.y);
+    } else {
+      cam.az-=(c.x-last.x)*0.006;
+      cam.el=Math.max(0.06,Math.min(1.5,cam.el+(c.y-last.y)*0.005));
+    }
+    last=c; place(); render();
+  });
+  const lift=e=>{
+    pts.delete(e.pointerId);
+    if(!pts.size){ mode=null; return; }
+    // dropping to one finger continues as an orbit from where that finger is,
+    // instead of jumping by the distance between the two
+    mode='orbit'; last=centreOf(); lastDist=0;
+  };
+  cv.addEventListener('pointerup',lift);
+  cv.addEventListener('pointercancel',lift);
+  cv.addEventListener('contextmenu',e=>e.preventDefault());
   cv.addEventListener('wheel',e=>{e.preventDefault();
-    cam.r=Math.max(50,Math.min(3000,cam.r*(1+Math.sign(e.deltaY)*0.11))); place(); render();},
+    cam.r=clampR(cam.r*(1+Math.sign(e.deltaY)*0.11)); place(); render();},
     {passive:false});
+  /* The canvas must own its gestures: without this the browser pans the page
+     instead, and on a phone the model simply will not move. */
+  cv.style.touchAction='none';
   function resize(){ const p=$('panePrev');
     renderer.setSize(p.clientWidth||640, p.clientHeight||420, false);
     camera.aspect=(p.clientWidth||640)/(p.clientHeight||420); camera.updateProjectionMatrix(); }
@@ -919,7 +1168,7 @@ function buildScene(els){
   const P = ll => [ (ll.lon-centre.lng)*Math.PI/180*R*Math.cos(midLat)*mm,
                     (ll.lat-centre.lat)*Math.PI/180*R*mm ];
   const half=sizeMM/2, CLIP={x0:-half,x1:half,y0:-half,y1:half};
-  const BASE=3, mode=$('roofs').value;
+  const BASE=3, mode=DETAIL.roofs;
 
   const GND = v.ff;               // the land sits on the frame floor, not the table
 
@@ -1113,8 +1362,8 @@ function exactParams(){
     terrain: $('terrain').checked ? 1 : 0,
     water: on.water?1:0, greenery: on.greenery?1:0,
     roads: on.roads?1:0, buildings: on.buildings?1:0,
-    roofs: $('roofs').value, ridge: v.ridge,
-    lod: $('lod').value, source: $('source').value,
+    roofs: DETAIL.roofs, ridge: v.ridge,
+    lod: DETAIL.lod, source: DETAIL.source,
     frame_width: v.fw, frame_depth: v.fd,
     frame_clearance: v.fc, frame_floor: v.ff,
     landmarks: 'landmarks.json'
@@ -2010,23 +2259,38 @@ function repaint(){
   }
   if(!$('panePrev').classList.contains('hidden')) buildScene(cache);
 }
-function showTab(prev){
-  $('tabMap').classList.toggle('on',!prev);
+/* showTab('map'|'prev'|'print'). It used to take a boolean, which stopped
+   working the moment there were three panes. */
+function showTab(which){
+  if(which===true)  which='prev';
+  if(which===false) which='map';
+  const prev = which==='prev';
+  $('tabMap').classList.toggle('on',which==='map');
   $('tabPrev').classList.toggle('on',prev);
+  $('tabPrint').classList.toggle('on',which==='print');
   $('btnRefresh').classList.toggle('hidden',!prev);
-  $('btnLoad3mf').classList.toggle('hidden',!prev);
-  $('paneMap').classList.toggle('hidden',prev);
+  $('paneMap').classList.toggle('hidden',which!=='map');
   $('panePrev').classList.toggle('hidden',!prev);
+  $('panePrint').classList.toggle('hidden',which!=='print');
   if(prev){
     if(cache && cacheKey===JSON.stringify([centre,spanM])){
       buildScene(cache); $('prevOverlay').classList.add('hidden');
     } else if(three) three.render();
-  } else setTimeout(()=>map.invalidateSize(),40);
+  } else if(which==='map') setTimeout(()=>map.invalidateSize(),40);
 }
-$('btnLoad3mf').addEventListener('click', ()=>$('file3mf').click());
-$('file3mf').addEventListener('change', e=>{ openExact(e.target.files); e.target.value=''; });
-$('tabMap').addEventListener('click',()=>showTab(false));
-$('tabPrev').addEventListener('click',()=>showTab(true));
+$('tourNext').addEventListener('click', tourNext);
+$('tourBack').addEventListener('click', tourBack);
+$('tourSkip').addEventListener('click', closeTour);
+$('btnHelp').addEventListener('click', ()=>openTour(0));
+addEventListener('keydown', e=>{
+  if($('tour').classList.contains('hidden')) return;
+  if(e.key==='Escape')     closeTour();
+  if(e.key==='ArrowRight') tourNext();
+  if(e.key==='ArrowLeft')  tourBack();
+});
+$('tabMap').addEventListener('click',()=>showTab('map'));
+$('tabPrev').addEventListener('click',()=>showTab('prev'));
+$('tabPrint').addEventListener('click',()=>showTab('print'));
 
 document.querySelectorAll('input,select').forEach(el=>{
   el.addEventListener('input',sync); el.addEventListener('change',sync);
@@ -2038,9 +2302,12 @@ drawFilms();
 pingServer();
 placeRect(true);
 setTimeout(()=>map.invalidateSize(),120);
+// Last, so a first-time visitor sees a page that is already drawn behind the
+// walkthrough rather than a blank one.
+maybeOpenTour();
 if(location.protocol==='file:'){
-  $('prevMsg').innerHTML='Build a preview from live OpenStreetMap data for this tile. '
-    +'Drag to orbit, scroll to zoom.<br><br><small>This page is open straight from disk, '
+  $('prevMsg').innerHTML='See your tile in 3D before you order.'
+    +'<br><br><small>This page is open straight from disk, '
     +'which blocks network requests in some browsers. If it fails, run '
     +'<code>python3 -m http.server</code> in this folder and open '
     +'<code>localhost:8000</code>.</small>';
