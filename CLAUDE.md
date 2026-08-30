@@ -14,6 +14,7 @@ files.
 | `map2model-console.html` | The web console. Single file, no build step. |
 | `test_console.js` | Offline harness for the console: stubs the DOM, Leaflet and three.js and invokes every top-level function. `node test_console.js`. |
 | `landmarks.json` | Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it **silently** when it is absent — so if it goes missing the CN Tower renders as straight prisms in preview *and* export, with no warning anywhere. It is tracked in git for exactly that reason. |
+| `Bambu_PLA_Basic_Hex_Code.pdf`, `Bambu_PLA_Matte_Hex_Code.pdf` | Bambu's own filament hex tables. The source of truth for every colour in `FILAMENTS`; keep them, and re-read them rather than trusting a hex you remember. |
 | `test_offline.py` | **MISSING from this folder.** Offline fixture — stubs `fetch_all()` so you can test without network. Never committed and not in the Recycle Bin, so it has to be rewritten; the Testing section below cannot run until it is. |
 
 ## Running it
@@ -96,8 +97,7 @@ cover halves slide on from opposite ends and tape at the seam.
 Filament slots (order matters — the slicer assigns by object order):
 terrain 1, greenery 2, roads 3, buildings 4; water rides the frame plate.
 
-Colours: terrain `#61C680`, water `#0078BF`, greenery `#FFFFFF`,
-roads `#1E2124`, buildings `#9BA3A8`, frame/cover black.
+Colours are filament choices now, not constants - see **Filaments and colour**.
 
 ## Hard-won details — read before changing geometry
 
@@ -203,21 +203,104 @@ loud `[warn]` that the first scan dropped data silently. A city tile with no
 roads is nearly always a lie; a second query is cheaper than a roadless plate.
 Set `retry_empty_fetch=False` to skip the retry.
 
+## Filaments and colour
+
+The buyer picks a filament for every part they can see, in the console, and the
+choice rides all the way through: preview -> copied command -> the 3MF that is
+actually printed.
+
+### The stock list
+
+Nine PLA Basic and nine PLA Matte, and nothing else. `FILAMENTS` in
+`map2model.py` is the source of truth; the console holds a mirror of it, and
+`test_console.js` fails if the two drift, because a buyer picking a colour the
+exporter does not know is an order that cannot be filled — and it would only
+fail days later, when the seller finally runs the command.
+
+Hex codes come from Bambu's own *Filament Hex Code Table* PDFs, which are in
+this folder (`Bambu_PLA_Basic_Hex_Code.pdf`, `Bambu_PLA_Matte_Hex_Code.pdf`).
+**Do not eyeball a colour** — the preview, the 3MF and the printed part all key
+off this table. `python map2model.py --list-filaments` prints it.
+
+Two pairs collide by hex and differ only in finish: Matte Ivory White and Basic
+Jade White are both `#FFFFFF`; Matte Charcoal and Basic Black are both
+`#000000` (Bambu's table really does say that). They render identically in the
+preview, which is why the picker names them instead of relying on a swatch.
+
+### Defaults
+
+| Layer | Filament | |
+|---|---|---|
+| terrain | PLA Matte Grass Green | `#61C680` |
+| greenery | PLA Basic Jade White | `#FFFFFF` |
+| roads | PLA Basic Black | `#000000` |
+| buildings | PLA Basic Gray | `#8E9089` |
+| water | PLA Matte Marine Blue | `#0078BF` |
+| frame | PLA Basic Black | `#000000` |
+| cover | PETG | not a buyer choice |
+
+The cover is a shipping shell, printed in whatever PETG is on the shelf for
+toughness. It is deliberately absent from the console — it is the one key the
+exporter has and the picker must not offer, and a test pins that.
+
+Buildings moved from `#9BA3A8` to `#8E9089` and roads from `#1E2124` to
+`#000000`: the old values were plausible greys that no filament actually is.
+
+### How colour reaches the print
+
+`--filaments terrain=matte_grass_green,buildings=basic_gray,...` — the console
+writes this into the copied command with **every enabled layer spelled out**,
+defaults included. That string is pasted into an Etsy order and run days later
+by a human: it has to say what the buyer chose, not what the exporter would
+guess on the day it runs. `parse_filaments()` rejects an unknown layer or
+colour outright rather than falling back to a default, for the same reason.
+
+Each plate is written with colour twice, because no single form is read by
+everything:
+
+- **`<basematerials>` + per-object `pid`/`pindex`** — the portable form. Any
+  3MF-aware tool opens the model in the right colours.
+- **`<m:colorgroup>`** — what Bambu Studio's "standard 3MF" reader actually
+  looks at. It maps groups to AMS slots **by order, not by hex**, which is why
+  object order is load-bearing (see the plate table above).
+
+Neither is listed in `requiredextensions`: a slicer that understands no
+material extension should still load the geometry rather than refuse the file.
+
+### Bambu Studio project metadata
+
+On top of that, every plate carries `Metadata/model_settings.config` and
+`Metadata/project_settings.config`, so it opens in Bambu Studio as a project
+with the right filament already in each AMS slot rather than as bare geometry
+with everything on slot 1. `--no-bambu-project` turns this off.
+
+- `model_settings.config` pins object *i* to extruder *i*.
+- `project_settings.config` carries `filament_colour`, `filament_type`,
+  `filament_ids` and `filament_settings_id`, plus a `map2model_slots` list the
+  slicer ignores — it is there so whoever loads the AMS can read what each slot
+  is for without opening the console.
+
+The Bambu SKU codes (`GFA00` = PLA Basic, `GFA01` = PLA Matte, `GFG02` =
+PETG HF) and the preset names are not guesses: they were read out of the
+profiles that ship with Bambu Studio, at
+`resources/profiles/BBL/filament/<name> @base.json`.
+
+**Not yet verified on the machine.** The 3MF is well-formed and the metadata
+matches a real MakerWorld project file field for field, but nobody has opened
+one of these in Bambu Studio and confirmed the AMS slots come up right. That is
+the one thing to check before the first real order.
+
 ## Print-volume rules
 
-Target machine is a **Bambu Lab P1S**: 256 mm bed, 256 mm of Z. Two separate
-limits, not one number:
+Target machine is a **Bambu Lab P1S**. The machine is 256 mm in every axis, but
+**250 mm is the working limit for everything printed here**, in all three axes,
+on every plate — one number, with margin built in. `Config.build_volume_mm =
+250.0`. There is **no CLI flag**; it is settable only in code. It used to say
+256, which let the exporter pass plates the console warned about.
 
-| | Limit | Why |
-|---|---|---|
-| **The model** | 200 × 200 × 250 mm | 200 mm is the largest print-size button; 250 leaves margin under the 256 mm Z ceiling |
-| **Any one plate** | 256 mm in XY, 250 mm in Z | frame and cover are *legitimately* wider than the model — they wrap it — so a plate is measured against the bed, not against 200 |
-
-In code that is `Config.bed_mm` (256.0, XY) and `Config.max_height_mm` (250.0,
-Z). They replaced a single `build_volume_mm = 256.0` that was applied to all
-three axes, which let a 254 mm cover pass the exporter while the console — which
-has always used 250 — warned about it. There is **no CLI flag** for either; they
-are settable only in code.
+The model itself lands well inside that: the largest print-size button is
+200 mm, and frame and cover are wider than the model because they wrap it
+(200 mm model + 2×clearance + 2×6 mm frame ≈ 213 mm).
 
 The console *warns*, it does not block: over 250 mm it writes a
 customer-readable `sizeNote` ("This will not print"), and past `250 × 0.85` a
@@ -297,9 +380,35 @@ becomes `tallest` and frames the camera around a box. `packaging()` now covers
 `box_` *and* `cover_`, and excludes both from the scene, the bounds and the
 object count, while the print-volume check still measures them.
 
+**The picker is a stock list, not a colour wheel.** It used to be an
+`<input type="color">` per layer, which let a buyer choose any of 16 million
+colours, approximately nine of which the shop can print. It is now a `<select>`
+of the stocked filaments, grouped by finish. A native `<select>` and not a
+custom swatch grid on purpose: on a phone it opens as a full-screen list with
+real touch targets, which nothing hand-rolled matches.
+
+**`col` is derived, never set.** `pick` (layer -> filament key) is the buyer's
+order; `col` is only its rendering, recomputed by `colFromPick()`. Setting a
+colour directly is how the swatch, the preview and the copied command drift
+apart.
+
+**The preview trusts the file, not the panel.** `serve.py` reads each object's
+colour back off `basematerials` and sends it with the mesh, and
+`buildExactScene()` prefers that over the panel's own idea. If the two ever
+disagree the file wins, because the file is what prints.
+
 **The server-side job is not cancelled.** Starting a new preview abandons the old
 job rather than stopping it; it runs to completion, holding a slot in the
 6-job cap. There is no `/api/cancel`.
+
+## Mobile
+
+Buyers arrive from an Etsy listing, which is overwhelmingly a phone, so the
+narrow layout is the common case and not an afterthought. Two breakpoints:
+940 px stacks the map above the panel; 560 px is the phone pass — 44 px touch
+targets (Apple's minimum), a shorter map that still leaves room to aim a tile,
+and **16 px font on the filament `<select>`**, because iOS silently zooms the
+whole page when a focused control is smaller than that.
 
 ## Testing
 
@@ -322,7 +431,7 @@ a call to a function that no longer exists passes cleanly. This bit twice
 `test_console.js` is that harness. No dependencies, no network, no browser:
 
 ```bash
-node test_console.js                    # 19 checks, exit 0 = clean
+node test_console.js                    # 26 checks, exit 0 = clean
 node test_console.js old-console.html   # point it at an older copy
 ```
 
@@ -331,8 +440,9 @@ a `vm` context, and then **invokes** every top-level function, failing only on
 `is not defined` / `is not a function` — the dead-call class that `node --check`
 misses. On top of that it regression-tests the ghost rectangle, the elapsed
 clock, the colour pipeline, the repeat-preview dispose and the cover handling.
-Verified against the pre-fix console: 14 of the 19 checks fail there, so they
-are real tests and not tautologies. The repeat-preview crash was *found* by this
+Verified against the pre-fix console: 14 of the original 19 fail there, and all
+7 filament checks fail against the pre-picker console, so they are real tests
+and not tautologies. The repeat-preview crash was *found* by this
 harness rather than fixed into it — calling `buildExactScene` twice is not
 something you would think to do by hand.
 

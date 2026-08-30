@@ -106,6 +106,12 @@ def cfg_from(q):
         frame_floor_mm=num("frame_floor", 2.0),
         verbose=True,
     )
+    fil = q.get("filaments", [""])[0]
+    if fil:
+        # parse_filaments raises on an unknown layer or colour. Let it: a
+        # silently dropped pick means quoting one colour and shipping another.
+        kw["filaments"] = map2model.parse_filaments(fil)
+
     lm = q.get("landmarks", [""])[0]
     if lm:
         path = os.path.join(HERE, os.path.basename(lm))
@@ -120,8 +126,15 @@ def mesh_from_3mf(path):
     out = []
     with zipfile.ZipFile(path) as z:
         xml = z.read("3D/3dmodel.model").decode("utf-8", "replace")
+    # The preview must show the colour that is IN THE FILE, not a hex the
+    # console picked independently -- otherwise the two drift and the buyer
+    # approves something the printer will not produce. basematerials is in
+    # document order and an object's pindex is an index into it.
+    palette = re.findall(r'<base name="[^"]*" displaycolor="(#[0-9A-Fa-f]{6})',
+                         xml)
     for chunk in xml.split("<object ")[1:]:
         name = re.search(r'name="([^"]*)"', chunk)
+        pindex = re.search(r'pindex="(\d+)"', chunk)
         body = chunk.split("</object>")[0]
         verts = re.findall(
             r'<vertex x="([-\d.eE+]+)" y="([-\d.eE+]+)" z="([-\d.eE+]+)"', body)
@@ -136,10 +149,15 @@ def mesh_from_3mf(path):
         for a, b, c in tris:
             idx += [int(a), int(b), int(c)]
         xs = pos[0::3]; ys = pos[1::3]; zs = pos[2::3]
+        colour = None
+        if pindex and int(pindex.group(1)) < len(palette):
+            colour = palette[int(pindex.group(1))]
         out.append({
             "name": name.group(1) if name else "object",
             "positions": pos,
             "indices": idx,
+            # the exact filament colour written into this plate
+            "color": colour,
             # the console needs these to police the build volume
             "size": [round(max(xs) - min(xs), 2),
                      round(max(ys) - min(ys), 2),

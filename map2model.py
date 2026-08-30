@@ -130,6 +130,97 @@ def print_timings():
 # ----------------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------------
+# 1b. Filaments
+# ----------------------------------------------------------------------------
+# The shop stocks these and only these. Hex codes are Bambu's own, read off
+# "Bambu Lab Filament Hex Code Table" for PLA Basic and PLA Matte -- the two
+# PDFs in this folder. Do not eyeball a colour: the preview, the 3MF and the
+# printed part all key off this table, so a wrong hex is a wrong sale.
+#
+# filament_id is Bambu's SKU code and is what Bambu Studio matches an AMS tray
+# against: GFA00 = PLA Basic, GFA01 = PLA Matte, GFG02 = PETG HF. It is read
+# straight from the profiles that ship with Bambu Studio
+# (resources/profiles/BBL/filament/<name> @base.json).
+#
+# NOTE two pairs collide by hex: Matte Ivory White and Basic Jade White are
+# both #FFFFFF, and Matte Charcoal and Basic Black are both #000000 (that is
+# what Bambu's table says). They render identically in the preview and differ
+# only in finish, which is why the picker shows the name, not just a swatch.
+
+FILAMENTS = {
+    # key                  display name              type  bambu id  hex
+    "basic_jade_white":  ("PLA Basic Jade White",   "PLA", "GFA00", "#FFFFFF"),
+    "basic_gray":        ("PLA Basic Gray",         "PLA", "GFA00", "#8E9089"),
+    "basic_red":         ("PLA Basic Red",          "PLA", "GFA00", "#C12E1F"),
+    "basic_orange":      ("PLA Basic Orange",       "PLA", "GFA00", "#FF6A13"),
+    "basic_yellow":      ("PLA Basic Yellow",       "PLA", "GFA00", "#F4EE2A"),
+    "basic_bambu_green": ("PLA Basic Bambu Green",  "PLA", "GFA00", "#00AE42"),
+    "basic_cocoa_brown": ("PLA Basic Cocoa Brown",  "PLA", "GFA00", "#6F5034"),
+    "basic_blue":        ("PLA Basic Blue",         "PLA", "GFA00", "#0A2989"),
+    "basic_black":       ("PLA Basic Black",        "PLA", "GFA00", "#000000"),
+    "matte_grass_green": ("PLA Matte Grass Green",  "PLA", "GFA01", "#61C680"),
+    "matte_marine_blue": ("PLA Matte Marine Blue",  "PLA", "GFA01", "#0078BF"),
+    "matte_ice_blue":    ("PLA Matte Ice Blue",     "PLA", "GFA01", "#A3D8E1"),
+    "matte_desert_tan":  ("PLA Matte Desert Tan",   "PLA", "GFA01", "#E8DBB7"),
+    "matte_dark_green":  ("PLA Matte Dark Green",   "PLA", "GFA01", "#68724D"),
+    "matte_ivory_white": ("PLA Matte Ivory White",  "PLA", "GFA01", "#FFFFFF"),
+    "matte_charcoal":    ("PLA Matte Charcoal",     "PLA", "GFA01", "#000000"),
+    "matte_nardo_gray":  ("PLA Matte Nardo Gray",   "PLA", "GFA01", "#757575"),
+    "matte_caramel":     ("PLA Matte Caramel",      "PLA", "GFA01", "#AE835B"),
+    # The cover is not a customer choice. It is a shipping shell, printed in
+    # whatever PETG is on the shelf for toughness, and it is never on a plate
+    # with a colour the buyer picked.
+    "petg_cover":        ("PETG (cover)",           "PETG", "GFG02", "#7F8285"),
+}
+
+# Which filament each layer gets when the buyer does not say. These are the
+# shop defaults and they are what the console starts on.
+DEFAULT_FILAMENTS = {
+    "terrain":   "matte_grass_green",
+    "greenery":  "basic_jade_white",
+    "roads":     "basic_black",
+    "buildings": "basic_gray",
+    "water":     "matte_marine_blue",
+    "frame":     "basic_black",
+    "cover":     "petg_cover",
+}
+
+# Buyer-pickable layers, in the order the console shows them.
+PICKABLE = ("terrain", "greenery", "roads", "buildings", "water", "frame")
+
+
+def filament_of(cfg, layer):
+    """(name, type, bambu_id, hex) for a layer, falling back to the default."""
+    key = (cfg.filaments or {}).get(layer) or DEFAULT_FILAMENTS.get(layer)
+    return FILAMENTS.get(key) or FILAMENTS[DEFAULT_FILAMENTS.get(layer, "basic_gray")]
+
+
+def parse_filaments(spec):
+    """
+    'terrain=matte_grass_green,roads=basic_black' -> dict.
+
+    Unknown layer names and unknown filament keys are hard errors: silently
+    ignoring one means a customer is quoted a colour and shipped another.
+    """
+    out = {}
+    for chunk in (spec or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "=" not in chunk:
+            raise ValueError(f"--filaments: expected layer=filament, got {chunk!r}")
+        layer, key = (x.strip() for x in chunk.split("=", 1))
+        if layer not in DEFAULT_FILAMENTS:
+            raise ValueError(f"--filaments: unknown layer {layer!r}; "
+                             f"pick from {', '.join(sorted(DEFAULT_FILAMENTS))}")
+        if key not in FILAMENTS:
+            raise ValueError(f"--filaments: unknown filament {key!r}; "
+                             f"pick from {', '.join(sorted(FILAMENTS))}")
+        out[layer] = key
+    return out
+
+
 @dataclass
 class Config:
     # geography
@@ -160,6 +251,13 @@ class Config:
     want_roads: bool = True
     want_buildings: bool = True
     building_scale: float = 1.0      # stretch buildings only, not the land
+    # layer -> FILAMENTS key. Empty means "all defaults"; see DEFAULT_FILAMENTS.
+    filaments: dict = field(default_factory=dict)
+    bambu_project: bool = True       # also write the Bambu Studio project
+                                     # metadata, so the plate opens with the
+                                     # right filament in each AMS slot
+    printer_model: str = "Bambu Lab P1S"
+    nozzle_mm: float = 0.4
 
     box: bool = False                # two-part shipping box around the frame
     box_wall_mm: float = 3.0
@@ -168,14 +266,11 @@ class Config:
     cover_lip_mm: float = 6.0        # how far the lips reach under the frame
     cover_lip_thickness_mm: float = 2.4
     box_headroom_mm: float = 10.0    # clear air above the tallest building
-    # P1S envelope. The bed is 256 mm square and the gantry clears 256 mm on
-    # Z, but the printable ceiling is treated as 250 mm to leave margin. The
-    # MODEL is capped at 200 x 200 x 250: 200 is the largest print-size button,
-    # and the console policed 250 on Z long before this did. Frame and cover
-    # plates are legitimately wider than the model - they wrap it - so a PLATE
-    # is measured against the bed, not against 200.
-    bed_mm: float = 256.0            # XY any one plate has to fit on
-    max_height_mm: float = 250.0     # usable Z; the machine itself does 256
+    # P1S. The machine is 256 mm in all three axes, but 250 is the working
+    # limit for anything printed here - it leaves margin and it is one number
+    # to remember. The console has always used 250; this used to say 256, so
+    # the exporter passed plates the console warned about.
+    build_volume_mm: float = 250.0   # every plate, every axis
 
     water_in_frame: bool = False     # water becomes the frame's floor and
                                      # the land model is cut through where
@@ -1733,9 +1828,9 @@ def build_box(cfg, W, H, model_top_mm):
               f"{2 * clr:.2f} mm play in every direction", file=sys.stderr)
         print(f"         {cfg.box_headroom_mm:.1f} mm of air above the tallest "
               f"point; corner posts carry the ceiling", file=sys.stderr)
-        if max(out_y, out_x / 2) > cfg.bed_mm or total_z > cfg.max_height_mm:
-            print(f"  [warn] the cover does not fit a {cfg.bed_mm:.0f} x "
-                  f"{cfg.bed_mm:.0f} x {cfg.max_height_mm:.0f} mm build volume "
+        BV = cfg.build_volume_mm
+        if max(out_y, out_x / 2) > BV or total_z > BV:
+            print(f"  [warn] the cover does not fit a {BV:.0f} mm build volume "
                   f"({out_x / 2:.0f} x {out_y:.0f} x {total_z:.0f} mm per half)",
                   file=sys.stderr)
     return left, right
@@ -2083,22 +2178,116 @@ def finalize(vf, name=""):
 # ----------------------------------------------------------------------------
 
 NS = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+NS_M = "http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
+
+# Bambu SKU -> the filament preset that ships with Bambu Studio. The full
+# preset name is "<this> @BBL <printer> <nozzle> nozzle".
+PRESET_BY_ID = {
+    "GFA00": "Bambu PLA Basic",
+    "GFA01": "Bambu PLA Matte",
+    "GFG02": "Bambu PETG HF",
+}
 
 
-def write_3mf(path, layers):
-    """layers: list of (name, (V, F)). Each becomes its own 3MF object."""
-    import uuid
-    parts = []
+def _xml_attr(v):
+    return (str(v).replace("&", "&amp;").replace('"', "&quot;")
+            .replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _bambu_configs(cfg, names, fils):
+    """
+    The two files that turn a plain 3MF into a Bambu Studio project.
+
+    model_settings.config pins each object to an AMS slot; project_settings
+    .config says what is loaded in those slots. Without the pair, Bambu opens
+    the file as bare geometry and drops every object on filament 1 -- the whole
+    model prints in one colour and the buyer's choices are gone.
+
+    Slot order IS object order. Bambu's standard-3MF reader assigns colours by
+    the order they appear, not by matching hex, so the two must not be sorted
+    independently anywhere.
+    """
+    nozzle = f"{cfg.nozzle_mm:g}"
+    machine = cfg.printer_model.replace("Bambu Lab ", "")
+
     objs = []
-    items = []
+    insts = []
+    for i, (name, fil) in enumerate(zip(names, fils), start=1):
+        objs.append(
+            f'  <object id="{i}">\n'
+            f'    <metadata key="name" value="{_xml_attr(name)}"/>\n'
+            f'    <metadata key="extruder" value="{i}"/>\n'
+            f'  </object>')
+        insts.append(
+            f'    <model_instance>\n'
+            f'      <metadata key="object_id" value="{i}"/>\n'
+            f'      <metadata key="instance_id" value="0"/>\n'
+            f'    </model_instance>')
+    model_settings = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<config>\n'
+        + "\n".join(objs) + '\n  <plate>\n'
+        '    <metadata key="plater_id" value="1"/>\n'
+        '    <metadata key="plater_name" value=""/>\n'
+        '    <metadata key="locked" value="false"/>\n'
+        + "\n".join(insts) + '\n  </plate>\n</config>\n')
+
+    project = {
+        "from": "project",
+        "name": "project_settings",
+        "printer_model": cfg.printer_model,
+        "printer_variant": nozzle,
+        "printer_settings_id": f"{cfg.printer_model} {nozzle} nozzle",
+        "nozzle_diameter": [nozzle],
+        "filament_colour": [f[3] for f in fils],
+        "filament_type": [f[1] for f in fils],
+        "filament_ids": [f[2] for f in fils],
+        "filament_settings_id": [
+            f"{PRESET_BY_ID.get(f[2], 'Generic PLA')} @BBL {machine} "
+            f"{nozzle} nozzle" for f in fils],
+        "filament_is_support": ["0"] * len(fils),
+        # What each slot is FOR. Not read by the slicer; it is here so the
+        # person at the printer can load the AMS without opening the console.
+        "map2model_slots": [f"{n} = {f[0]}" for n, f in zip(names, fils)],
+    }
+    return model_settings, json.dumps(project, indent=4)
+
+
+def write_3mf(path, layers, cfg=None):
+    """
+    layers: list of (name, (V, F)). Each becomes its own 3MF object.
+
+    Colour is written twice on purpose, because no single form is read by
+    everything:
+
+      * <basematerials> + per-object pid/pindex -- the portable form. Any
+        3MF-aware tool shows the model in the right colours.
+      * <m:colorgroup> -- what Bambu Studio's "standard 3MF" reader actually
+        looks at. It maps groups to AMS slots BY ORDER, not by hex.
+
+    Neither is marked in requiredextensions: a slicer that understands no
+    material extension at all should still load the geometry rather than
+    refuse the file.
+    """
+    objs, items, bases, colors = [], [], [], []
+    names, fils = [], []
     oid = 0
     for name, vf in layers:
         if vf is None:
             continue
         V, F = vf
         oid += 1
+        fil = filament_of(cfg, name) if cfg is not None else \
+            FILAMENTS[DEFAULT_FILAMENTS.get(name, "basic_gray")]
+        names.append(name)
+        fils.append(fil)
+        # displaycolor is #RRGGBBAA; the alpha is required by the spec.
+        bases.append(f'<base name="{_xml_attr(fil[0])}" '
+                     f'displaycolor="{fil[3]}FF"/>')
+        colors.append(f'<m:color color="{fil[3]}FF"/>')
+
         buf = io.StringIO()
-        buf.write(f'<object id="{oid}" name="{name}" type="model"><mesh><vertices>')
+        buf.write(f'<object id="{oid}" name="{_xml_attr(name)}" type="model" '
+                  f'pid="1" pindex="{oid - 1}"><mesh><vertices>')
         for x, y, z in V:
             buf.write(f'<vertex x="{x:.5f}" y="{y:.5f}" z="{z:.5f}"/>')
         buf.write('</vertices><triangles>')
@@ -2109,12 +2298,20 @@ def write_3mf(path, layers):
         buf.write('</triangles></mesh></object>')
         objs.append(buf.getvalue())
         items.append(f'<item objectid="{oid}" transform="1 0 0 0 1 0 0 0 1 0 0 0" '
-                     f'partnumber="{name}"/>')
+                     f'partnumber="{_xml_attr(name)}"/>')
+
+    # Resource ids 1 and 2 are the material groups, so objects start at 3?  No:
+    # 3MF ids only have to be unique per resource TYPE, and objects here are
+    # numbered from 1 independently. pid="1" therefore always means the
+    # basematerials group below, never object 1.
+    res = ('<basematerials id="1">' + "".join(bases) + '</basematerials>'
+           '<m:colorgroup id="2">' + "".join(colors) + '</m:colorgroup>'
+           + "".join(objs))
 
     xml = ('<?xml version="1.0" encoding="UTF-8"?>'
-           f'<model unit="millimeter" xmlns="{NS}">'
+           f'<model unit="millimeter" xmlns="{NS}" xmlns:m="{NS_M}">'
            '<metadata name="Application">map2model</metadata>'
-           '<resources>' + "".join(objs) + '</resources>'
+           '<resources>' + res + '</resources>'
            '<build>' + "".join(items) + '</build></model>')
 
     ct = ('<?xml version="1.0" encoding="UTF-8"?>'
@@ -2131,6 +2328,10 @@ def write_3mf(path, layers):
         z.writestr("[Content_Types].xml", ct)
         z.writestr("_rels/.rels", rels)
         z.writestr("3D/3dmodel.model", xml)
+        if cfg is not None and cfg.bambu_project and names:
+            ms, ps = _bambu_configs(cfg, names, fils)
+            z.writestr("Metadata/model_settings.config", ms)
+            z.writestr("Metadata/project_settings.config", ps)
 
 
 # ----------------------------------------------------------------------------
@@ -2449,7 +2650,7 @@ def run(cfg, out_path):
                 if not sub:
                     continue
                 path = f"{stem}{suffix}{ext}"
-                write_3mf(path, sub)
+                write_3mf(path, sub, cfg)
                 written.append((path, [n for n, _ in sub]))
                 allv = np.vstack([vf[0] for _, vf in sub if vf is not None
                                   and len(vf[0])])
@@ -2457,7 +2658,7 @@ def run(cfg, out_path):
                                     float(allv[:, 1].max() - allv[:, 1].min()),
                                     float(allv[:, 2].max() - allv[:, 2].min()))
             print("", file=sys.stderr)
-            bed, maxz = cfg.bed_mm, cfg.max_height_mm
+            BV = cfg.build_volume_mm
             over = []
             for path, names in written:
                 dims = plate_size.get(path)
@@ -2466,18 +2667,17 @@ def run(cfg, out_path):
                       file=sys.stderr)
                 if dims:
                     w, d, hgt = dims
-                    fits = max(w, d) <= bed and hgt <= maxz
+                    fits = max(w, d) <= BV and hgt <= BV
                     print(f"      {w:.1f} x {d:.1f} x {hgt:.1f} mm"
                           + ("" if fits else "   DOES NOT FIT"), file=sys.stderr)
                     if not fits:
                         over.append((path, w, d, hgt))
             if over:
                 print("", file=sys.stderr)
-                print(f"  [warn] {len(over)} plate(s) exceed the {bed:.0f} x "
-                      f"{bed:.0f} x {maxz:.0f} mm build volume and cannot be "
-                      f"printed:", file=sys.stderr)
+                print(f"  [warn] {len(over)} plate(s) exceed the {BV:.0f} mm build "
+                      f"volume and cannot be printed:", file=sys.stderr)
                 for path, w, d, hgt in over:
-                    axis = "height" if hgt > maxz else "footprint"
+                    axis = "height" if hgt > BV else "footprint"
                     print(f"         {os.path.basename(path)}  {w:.0f} x {d:.0f} "
                           f"x {hgt:.0f} mm  ({axis})", file=sys.stderr)
                 print("         Reduce the print size, or lower the building "
@@ -2495,7 +2695,7 @@ def run(cfg, out_path):
             d = os.path.dirname(os.path.abspath(out_path))
             if d:
                 os.makedirs(d, exist_ok=True)
-            write_3mf(out_path, layers)
+            write_3mf(out_path, layers, cfg)
 
     if cfg.verbose:
         print_funnel()
@@ -2534,7 +2734,25 @@ def load_landmarks(path):
         return ()
 
 
+def _list_filaments():
+    """
+    Printed before parse_args, because --bbox/--center is a required mutually
+    exclusive group and argparse would reject a bare --list-filaments.
+    """
+    w = max(len(k) for k in FILAMENTS)
+    print("stocked filaments (use with --filaments layer=key):\n")
+    for key, (nm, typ, fid, hexc) in FILAMENTS.items():
+        dflt = [L for L, k in DEFAULT_FILAMENTS.items() if k == key]
+        print(f"  {key:<{w}}  {hexc}  {nm:<24} {typ:<4} {fid}"
+              + (f"   default for {', '.join(dflt)}" if dflt else ""))
+    print("\nlayers:", ", ".join(sorted(DEFAULT_FILAMENTS)))
+
+
 def main():
+    if "--list-filaments" in sys.argv:
+        _list_filaments()
+        return
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     g = ap.add_mutually_exclusive_group(required=True)
@@ -2613,6 +2831,21 @@ def main():
                     help="needle tip width relative to the mast (default 0.30)")
     ap.add_argument("--water-depth", type=float, default=1.2,
                     help="how deep the water basin is cut into the land (mm)")
+    ap.add_argument("--filaments", default="",
+                    help="per-layer filament, e.g. "
+                         "'terrain=matte_grass_green,buildings=basic_gray'. "
+                         "Layers: " + ", ".join(sorted(DEFAULT_FILAMENTS)) +
+                         ". Run --list-filaments for the colours.")
+    ap.add_argument("--list-filaments", action="store_true",
+                    help="print the stocked filaments and exit")
+    ap.add_argument("--no-bambu-project", action="store_true",
+                    help="write a plain 3MF only. By default each plate also "
+                         "carries Bambu Studio project metadata so it opens "
+                         "with the right filament in each AMS slot.")
+    ap.add_argument("--printer", default="Bambu Lab P1S",
+                    help="printer preset name for the Bambu project metadata")
+    ap.add_argument("--nozzle", type=float, default=0.4,
+                    help="nozzle diameter for the Bambu project metadata")
     ap.add_argument("--sea-level", type=float, default=0.0,
                     help="water surface relative to the lowest land (mm); "
                          "negative sits it lower")
@@ -2664,6 +2897,14 @@ def main():
                          "of parking it beside for printing")
     a = ap.parse_args()
 
+    if a.list_filaments:          # unreachable via argparse (see _list_filaments)
+        w = max(len(k) for k in FILAMENTS)
+        for key, (nm, typ, fid, hexc) in FILAMENTS.items():
+            dflt = [L for L, k in DEFAULT_FILAMENTS.items() if k == key]
+            print(f"  {key:<{w}}  {hexc}  {nm:<24} {typ:<4} {fid}"
+                  + (f"   default for {', '.join(dflt)}" if dflt else ""))
+        return
+
     if a.bbox:
         bbox = tuple(a.bbox)
     else:
@@ -2705,7 +2946,10 @@ def main():
                  box=a.box, box_wall_mm=a.box_wall,
                  cover_lip_mm=a.cover_lip,
                  box_clearance_mm=a.box_clearance,
-                 box_headroom_mm=a.box_headroom)
+                 box_headroom_mm=a.box_headroom,
+                 filaments=parse_filaments(a.filaments),
+                 bambu_project=not a.no_bambu_project,
+                 printer_model=a.printer, nozzle_mm=a.nozzle)
     run(cfg, a.out)
 
 

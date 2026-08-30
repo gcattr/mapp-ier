@@ -191,7 +191,7 @@ try {
 console.log('top level evaluated cleanly\n');
 
 /* One lookup table: `function` declarations live on the sandbox global,
-   `const` arrows come back through __C. */
+   `const` arrows come back through G. */
 const G = new Proxy(sandbox, {
   get: (t, k) => (k in t ? t[k] : (t.__C || {})[k]),
   has: (t, k) => k in t || k in (t.__C || {}),
@@ -387,6 +387,121 @@ check('a comfortable cover produces no warning at all', () => {
   const note = document.getElementById('sizeNote');
   ok(!/will not print|close to the limit/i.test(note.innerHTML),
      'spurious warning for a 90 mm cover: ' + note.innerHTML);
+});
+
+/* ---------------- filaments ----------------
+   The console's stock list and map2model.py's FILAMENTS are two copies of one
+   table. A buyer can only pick what the console offers, and the exporter can
+   only fill what it knows, so a drift between them is an order that cannot be
+   produced -- silently, because --filaments would reject the key only when the
+   seller finally runs the command, days after the sale. Parse the Python and
+   compare. */
+function pythonFilaments() {
+  const py = fs.readFileSync(path.join(__dirname, 'map2model.py'), 'utf8');
+  const block = py.slice(py.indexOf('FILAMENTS = {'));
+  const body = block.slice(0, block.indexOf('\n}'));
+  const out = {};
+  for (const m of body.matchAll(
+      /"([a-z0-9_]+)":\s*\("([^"]+)",\s*"([A-Z]+)",\s*"([A-Z0-9]+)",\s*"(#[0-9A-Fa-f]{6})"\)/g)) {
+    out[m[1]] = { nm: m[2], type: m[3], id: m[4], hex: m[5].toUpperCase() };
+  }
+  return out;
+}
+function pythonDefaults() {
+  const py = fs.readFileSync(path.join(__dirname, 'map2model.py'), 'utf8');
+  const block = py.slice(py.indexOf('DEFAULT_FILAMENTS = {'));
+  const body = block.slice(0, block.indexOf('\n}'));
+  const out = {};
+  for (const m of body.matchAll(/"([a-z_]+)":\s*"([a-z0-9_]+)"/g)) out[m[1]] = m[2];
+  return out;
+}
+
+check('the console stocks exactly the filaments the exporter knows', () => {
+  const py = pythonFilaments();
+  const js = G.FILAMENTS;
+  ok(js, 'the console has no FILAMENTS table');
+  // petg_cover is the shipping shell. It is deliberately NOT offered to a
+  // buyer, so it is the one key the exporter has and the console must not.
+  const pyKeys = Object.keys(py).filter(k => k !== 'petg_cover').sort();
+  const jsKeys = Object.keys(js).sort();
+  eq(jsKeys.join(','), pyKeys.join(','), 'stock lists differ');
+  ok(pyKeys.length >= 18, 'expected the full 18-colour range, got ' + pyKeys.length);
+});
+
+check('every hex matches Bambu\'s table on both sides', () => {
+  const py = pythonFilaments();
+  for (const [k, f] of Object.entries(G.FILAMENTS)) {
+    eq(f.hex.toUpperCase(), py[k].hex, 'hex differs for ' + k);
+  }
+});
+
+check('the console defaults are the exporter defaults', () => {
+  const py = pythonDefaults();
+  for (const [layer, key] of Object.entries(G.DEFAULT_FILAMENTS)) {
+    eq(key, py[layer], 'default differs for ' + layer);
+  }
+  // the cover is the exporter's business only
+  eq(py.cover, 'petg_cover', 'the cover stopped being PETG');
+  ok(!('cover' in G.DEFAULT_FILAMENTS), 'the console offers the cover as a choice');
+});
+
+check('a picked filament reaches the copied command', () => {
+  G.pick.buildings = 'basic_red';
+  G.colFromPick();
+  const cmd = G.buildCmd();
+  ok(/--filaments /.test(cmd), 'no --filaments in the command: ' + cmd);
+  ok(/buildings=basic_red/.test(cmd), 'the pick is missing: ' + cmd);
+  // every enabled layer is named, defaults included -- the command is read by
+  // a human days later and must not depend on what the exporter would guess
+  ok(/terrain=matte_grass_green/.test(cmd), 'defaults are not spelled out: ' + cmd);
+  G.pick.buildings = G.DEFAULT_FILAMENTS.buildings;
+  G.colFromPick();
+});
+
+check('picking a filament repaints the swatch and the preview colour', () => {
+  G.pick.terrain = 'matte_caramel';
+  G.colFromPick();
+  eq(G.col.terrain, '#AE835B', 'col did not follow pick');
+  G.drawFilms();
+  const html = document.getElementById('films').innerHTML;
+  ok(/#AE835B/i.test(html), 'the swatch did not repaint: ' + html.slice(0, 200));
+  G.pick.terrain = G.DEFAULT_FILAMENTS.terrain;
+  G.colFromPick();
+});
+
+check('the picker offers no colour the shop does not stock', () => {
+  G.drawFilms();
+  const html = document.getElementById('films').innerHTML;
+  const offered = [...html.matchAll(/<option value="([a-z0-9_]+)"/g)].map(m => m[1]);
+  ok(offered.length > 0, 'the picker rendered no options');
+  for (const key of offered) {
+    ok(G.FILAMENTS[key], 'the picker offers an unstocked filament: ' + key);
+  }
+});
+
+check('the exact preview trusts the colour in the 3MF over the panel', () => {
+  // serve.py reads the colour back off basematerials. If the file and the
+  // panel ever disagree the file wins, because the file is what prints.
+  G.pick.buildings = 'basic_blue';
+  G.colFromPick();
+  materials.length = 0;
+  G.buildExactScene([
+    { name: 'terrain', positions: [0, 0, 0, 10, 0, 0, 0, 10, 0],
+      indices: [0, 1, 2], size: [10, 10, 1], color: '#FF6A13' },
+    { name: 'buildings', positions: [0, 0, 0, 5, 0, 0, 0, 5, 8],
+      indices: [0, 1, 2], size: [5, 5, 8] },
+  ]);
+  // materials carry a THREE.Color already converted to linear, so compare
+  // against FIL() of the colour the file claimed rather than a raw hex
+  const want = G.FIL('#FF6A13');
+  const hit = materials.some(m => m.color instanceof Color
+    && Math.abs(m.color.r - want.r) < 1e-6
+    && Math.abs(m.color.g - want.g) < 1e-6
+    && Math.abs(m.color.b - want.b) < 1e-6);
+  ok(hit, 'the 3MF colour was ignored in favour of the panel: '
+     + JSON.stringify(materials.map(m => m.color)));
+  G.pick.buildings = G.DEFAULT_FILAMENTS.buildings;
+  G.colFromPick();
 });
 
 /* ---------------- results ---------------- */

@@ -153,13 +153,15 @@ select{width:auto;min-width:118px;font-family:var(--sans)}
 
 .films{display:grid;gap:8px}
 .film{display:flex;align-items:center;gap:10px;padding:8px 10px;background:#fff;
-  border:1px solid var(--rule);border-radius:2px;transition:opacity .15s}
+  border:1px solid var(--rule);border-radius:2px;transition:opacity .15s;
+  flex-wrap:wrap}
 .film.off{opacity:.42}
-.swatch{width:24px;height:24px;border-radius:2px;border:1px solid rgba(0,0,0,.28);
-  flex:none;padding:0;background:none;cursor:pointer}
-.swatch::-webkit-color-swatch-wrapper{padding:1px}
-.swatch::-webkit-color-swatch{border:0;border-radius:1px}
-.swatch::-moz-color-swatch{border:0;border-radius:1px}
+.sw{width:24px;height:24px;border-radius:2px;border:1px solid rgba(0,0,0,.28);
+  flex:none;box-shadow:inset 0 0 0 1px rgba(255,255,255,.35)}
+.fsel{flex:none;width:100%;order:9;font:inherit;font-size:12.5px;padding:7px 8px;
+  min-height:38px;border:1px solid var(--rule);border-radius:2px;background:#fff;
+  color:var(--ink)}
+.fsel:disabled{opacity:.5}
 .film .nm{flex:1;font-size:13px;font-weight:500}
 .film .slot{font-family:var(--mono);font-size:10.5px;background:#E8EEF2;
   border:1px solid var(--rule);border-radius:2px;padding:1px 5px}
@@ -191,6 +193,23 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
 @media (max-width:940px){
   .main{grid-template-columns:1fr;grid-template-rows:minmax(400px,54vh) 1fr}
   .left{border-right:0;border-bottom:1px solid var(--rule)}
+}
+/* Phones. The buyer arrives here from an Etsy listing, which is overwhelmingly
+   a phone, so this is the common case and not an afterthought. Targets go to
+   44px (Apple's minimum), the map keeps enough height to aim a tile, and the
+   copied command stops being a 3-line wall of text. */
+@media (max-width:560px){
+  header{padding:10px 14px;gap:10px;flex-wrap:wrap}
+  .main{grid-template-rows:minmax(300px,44vh) 1fr}
+  .panel{padding-bottom:8px}
+  section{padding:12px 14px}
+  .film{gap:8px;padding:10px}
+  .film .note{display:none}
+  .fsel{min-height:44px;font-size:16px}   /* 16px stops iOS zooming on focus */
+  input[type=checkbox]{width:22px;height:22px}
+  .seg button{min-height:44px}
+  pre{font-size:11.5px;max-height:96px}
+  #copy{width:100%;min-height:44px}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
@@ -364,45 +383,116 @@ const $ = id => document.getElementById(id);
 const R = 6378137;
 
 /* ---------------- filaments ---------------- */
+/* THE STOCK LIST. These are the only filaments the shop actually holds, so
+   they are the only ones a buyer can choose. Hex codes come from Bambu's own
+   "Filament Hex Code Table" PDFs for PLA Basic and PLA Matte, and this table is
+   a mirror of FILAMENTS in map2model.py -- test_console.js fails if the two
+   drift apart, because a buyer picking a colour the exporter does not know is
+   an order that cannot be filled.
+
+   Two pairs are identical in hex and differ only in finish: Matte Ivory White
+   and Basic Jade White are both #FFFFFF; Matte Charcoal and Basic Black are
+   both #000000. That is why the picker names them instead of relying on the
+   swatch. */
+const FILAMENTS = {
+  basic_jade_white:  {nm:'Jade White',   grp:'PLA Basic', hex:'#FFFFFF'},
+  basic_gray:        {nm:'Gray',         grp:'PLA Basic', hex:'#8E9089'},
+  basic_red:         {nm:'Red',          grp:'PLA Basic', hex:'#C12E1F'},
+  basic_orange:      {nm:'Orange',       grp:'PLA Basic', hex:'#FF6A13'},
+  basic_yellow:      {nm:'Yellow',       grp:'PLA Basic', hex:'#F4EE2A'},
+  basic_bambu_green: {nm:'Bambu Green',  grp:'PLA Basic', hex:'#00AE42'},
+  basic_cocoa_brown: {nm:'Cocoa Brown',  grp:'PLA Basic', hex:'#6F5034'},
+  basic_blue:        {nm:'Blue',         grp:'PLA Basic', hex:'#0A2989'},
+  basic_black:       {nm:'Black',        grp:'PLA Basic', hex:'#000000'},
+  matte_grass_green: {nm:'Grass Green',  grp:'PLA Matte', hex:'#61C680'},
+  matte_marine_blue: {nm:'Marine Blue',  grp:'PLA Matte', hex:'#0078BF'},
+  matte_ice_blue:    {nm:'Ice Blue',     grp:'PLA Matte', hex:'#A3D8E1'},
+  matte_desert_tan:  {nm:'Desert Tan',   grp:'PLA Matte', hex:'#E8DBB7'},
+  matte_dark_green:  {nm:'Dark Green',   grp:'PLA Matte', hex:'#68724D'},
+  matte_ivory_white: {nm:'Ivory White',  grp:'PLA Matte', hex:'#FFFFFF'},
+  matte_charcoal:    {nm:'Charcoal',     grp:'PLA Matte', hex:'#000000'},
+  matte_nardo_gray:  {nm:'Nardo Gray',   grp:'PLA Matte', hex:'#757575'},
+  matte_caramel:     {nm:'Caramel',      grp:'PLA Matte', hex:'#AE835B'},
+};
+const FIL_GROUPS = ['PLA Basic', 'PLA Matte'];
+
 /* Objects leave the 3MF in this order and a slicer assigns filament slots in
-   the same order, so the panel lists them that way.                          */
+   the same order, so the panel lists them that way. The frame is here because
+   the buyer sees it -- it is the border of the finished tile. The cover is NOT:
+   it is a shipping shell printed in whatever PETG is on the shelf. */
 const FILMS = [
-  {k:'terrain',  nm:'Terrain',   col:'#61C680', note:'always on', locked:true},
-  {k:'water',    nm:'Water',     col:'#0078BF', note:'--no-water'},
-  {k:'greenery', nm:'Greenery',  col:'#FFFFFF', note:'--no-greenery'},
-  {k:'roads',    nm:'Roads',     col:'#1E2124', note:'--no-roads'},
-  {k:'buildings',nm:'Buildings', col:'#9BA3A8', note:'--no-buildings'},
+  {k:'terrain',  nm:'Terrain',   note:'always on', locked:true},
+  {k:'water',    nm:'Water',     note:'--no-water'},
+  {k:'greenery', nm:'Greenery',  note:'--no-greenery'},
+  {k:'roads',    nm:'Roads',     note:'--no-roads'},
+  {k:'buildings',nm:'Buildings', note:'--no-buildings'},
+  {k:'frame',    nm:'Frame',     note:'border + water plate', locked:true},
 ];
-const on  = {terrain:true, water:true, greenery:true, roads:true, buildings:true};
-const col = Object.fromEntries(FILMS.map(f=>[f.k, f.col]));
+const on  = {terrain:true, water:true, greenery:true, roads:true,
+             buildings:true, frame:true};
+
+/* The shop defaults. Mirrors DEFAULT_FILAMENTS in map2model.py. */
+const DEFAULT_FILAMENTS = {
+  terrain:'matte_grass_green', greenery:'basic_jade_white',
+  roads:'basic_black',         buildings:'basic_gray',
+  water:'matte_marine_blue',   frame:'basic_black',
+};
+/* layer -> filament key. This is the buyer's order; `col` is only its
+   rendering. Never set col directly -- set pick and let colFromPick() derive,
+   so the swatch, the preview and the copied command cannot disagree. */
+const pick = Object.assign({}, DEFAULT_FILAMENTS);
+const col  = {};
+function colFromPick(){
+  for(const k in pick) col[k] = (FILAMENTS[pick[k]]||{hex:'#888888'}).hex;
+}
+colFromPick();
 let mono = false;
-const MONO_COL = '#EDEBE4', FRAME_COL = '#1E2124';
-const shown = k => mono ? MONO_COL : col[k];
+const MONO_COL = '#EDEBE4';
+const shown = k => mono ? MONO_COL : (col[k] || '#9BA3A8');
 /* The renderer writes sRGB, so material colours must be given in LINEAR space.
    Setting a hex straight onto a material skips that conversion and every
    filament renders washed out. Always build material colours through FIL(). */
 const FIL = hex => new THREE.Color(hex).convertSRGBToLinear();
 
+/* Options for one picker, grouped by finish. A <select> rather than a swatch
+   grid on purpose: on a phone the native picker is a full-screen list with
+   real-sized touch targets, which no custom dropdown matches. */
+function filOptions(sel){
+  return FIL_GROUPS.map(g=>{
+    const rows = Object.entries(FILAMENTS).filter(([,f])=>f.grp===g)
+      .map(([key,f])=>`<option value="${key}"${key===sel?' selected':''}>${f.nm}</option>`)
+      .join('');
+    return `<optgroup label="${g}">${rows}</optgroup>`;
+  }).join('');
+}
+
 function drawFilms(){
   const wif = true;   // water always prints with the frame
   let slot = 0;
   $('films').innerHTML = FILMS.map(f=>{
-    const inPlate = on[f.k] && !(f.k==='water' && wif);
-    if(inPlate) slot++;
-    const tag = !on[f.k] ? 'off' : (f.k==='water'&&wif) ? 'frame plate' : 'slot '+slot;
+    const onPlate = on[f.k] && !(f.k==='water'&&wif) && f.k!=='frame';
+    if(onPlate) slot++;
+    const tag = !on[f.k] ? 'off'
+              : (f.k==='water'&&wif) ? 'frame plate'
+              : f.k==='frame' ? 'frame plate' : 'slot '+slot;
+    const fil = FILAMENTS[pick[f.k]] || {nm:'?', hex:'#888888'};
     return `<div class="film ${on[f.k]?'':'off'}">
-      <input type="color" class="swatch" value="${col[f.k]}" data-col="${f.k}"
-             ${mono?'disabled':''} aria-label="${f.nm} colour">
+      <span class="sw" style="background:${mono?MONO_COL:fil.hex}"
+            aria-hidden="true"></span>
       <span class="nm">${f.nm}</span><span class="slot">${tag}</span>
-      <span class="note">${f.note}</span>
       <input type="checkbox" ${on[f.k]?'checked':''} ${f.locked?'disabled':''}
-             data-film="${f.k}" aria-label="Include ${f.nm}"></div>`;
+             data-film="${f.k}" aria-label="Include ${f.nm}">
+      <select class="fsel" data-fil="${f.k}" ${on[f.k]?'':'disabled'}
+              aria-label="${f.nm} filament">${filOptions(pick[f.k])}</select>
+    </div>`;
   }).join('');
   $('films').querySelectorAll('[data-film]').forEach(cb=>
     cb.addEventListener('change', ()=>{ on[cb.dataset.film]=cb.checked;
       drawFilms(); sync(); repaint(); }));
-  $('films').querySelectorAll('[data-col]').forEach(ci=>
-    ci.addEventListener('input', ()=>{ col[ci.dataset.col]=ci.value; repaint(); }));
+  $('films').querySelectorAll('[data-fil]').forEach(sel=>
+    sel.addEventListener('change', ()=>{
+      pick[sel.dataset.fil] = sel.value; colFromPick();
+      drawFilms(); sync(); repaint(); }));
 }
 $('modeFull').addEventListener('click',()=>{mono=false;
   $('modeFull').classList.add('on');$('modeMono').classList.remove('on');drawFilms();repaint();});
@@ -556,6 +646,12 @@ function buildCmd(){
   a.push('--frame', `--frame-width ${v.fw}`, `--frame-depth ${v.fd}`,
          `--frame-clearance ${v.fc}`);
   if(Math.abs(v.ff-2)>1e-9) a.push(`--frame-floor ${v.ff}`);
+  // Every choice is spelled out, including the ones that happen to be the
+  // default. This string is pasted into an Etsy order and run days later by a
+  // human: it has to say what the buyer actually chose, not what the exporter
+  // would have guessed on the day it runs.
+  const fl = FILMS.filter(f=>on[f.k]).map(f=>`${f.k}=${pick[f.k]}`).join(',');
+  if(fl) a.push(`--filaments ${fl}`);
   a.push(`-o ${$('out').value.trim()||'placeholder.3mf'}`);
   return `python map2model.py ${a.join(' ')}`;
 }
@@ -833,7 +929,7 @@ function buildScene(els){
   // Only the TOP face is water; the sides and underside are the frame colour,
   // so the plate reads as one piece with the border. BoxGeometry's material
   // groups run [+x, -x, +y, -y, +z, -z], so index 2 is the top.
-  const dark = new THREE.MeshPhongMaterial({color: FRAME_COL,
+  const dark = new THREE.MeshPhongMaterial({color: shown('frame'),
     flatShading:true, shininess:6, specular:0x101418});
   const blue = new THREE.MeshPhongMaterial({color: shown('water'),
     flatShading:true, shininess:38, specular:0x24405c});
@@ -968,7 +1064,7 @@ function buildScene(els){
   hole.moveTo(-iw/2,-iw/2); hole.lineTo(iw/2,-iw/2); hole.lineTo(iw/2,iw/2); hole.lineTo(-iw/2,iw/2);
   fs.holes.push(hole);
   const fm=new THREE.Mesh(new THREE.ExtrudeGeometry(fs,{depth:v.fd,bevelEnabled:false}),
-    new THREE.MeshPhongMaterial({color:FRAME_COL, flatShading:true,
+    new THREE.MeshPhongMaterial({color:shown('frame'), flatShading:true,
       shininess:6, specular:0x101418}));
   // ExtrudeGeometry already spans 0..depth, and the rotation maps that onto +Y.
   // Setting position.y = depth (as this did) lifted the frame clear of the model.
@@ -985,7 +1081,7 @@ function buildScene(els){
     + `${sizeMM} × ${sizeMM} mm<br>tallest ${tallest.toFixed(1)} mm`;
   $('prevLegend').innerHTML = mono
     ? `<span><i style="background:${MONO_COL}"></i>Model</span>`
-      + `<span><i style="background:${FRAME_COL}"></i>Frame</span>`
+      + `<span><i style="background:${shown('frame')}"></i>Frame</span>`
     : FILMS.filter(f=>on[f.k]).map(f=>
         `<span><i style="background:${col[f.k]}"></i>${f.nm}</span>`).join('');
   $('prevHud').classList.remove('hidden'); $('prevLegend').classList.remove('hidden');
@@ -1057,8 +1153,13 @@ function buildExactScene(layers){
   const tallest = z1-z0;
   for(const L of layers){
     if(packaging(L.name)) continue;           // measured below, never drawn
-    const colour = L.name === 'frame' ? FRAME_COL
-                 : (on.hasOwnProperty(L.name) ? shown(L.name) : shown('buildings'));
+    // Prefer the colour the EXPORTER wrote into the 3MF (serve.py reads it
+    // back off basematerials). Falling back to the panel's own idea of the
+    // colour is only for an older server that does not send one -- if the two
+    // ever disagree, the file is the truth, because the file is what prints.
+    const colour = mono ? MONO_COL
+                 : (L.color ? L.color
+                 : (on.hasOwnProperty(L.name) ? shown(L.name) : shown('buildings')));
     const src = L.positions, pos = new Float32Array(src.length);
     for(let i=0;i<src.length;i+=3){
       pos[i]=src[i]-cx; pos[i+1]=src[i+1]-cy; pos[i+2]=src[i+2]-z0;
@@ -1086,7 +1187,7 @@ function buildExactScene(layers){
       geo.addGroup(up.length, side.length, 1);
       mat = [new THREE.MeshPhongMaterial({color:FIL(shown('water')), flatShading:true,
                shininess:38, specular:0x24405c}),
-             new THREE.MeshPhongMaterial({color:FIL(FRAME_COL), flatShading:true,
+             new THREE.MeshPhongMaterial({color:FIL(shown('frame')), flatShading:true,
                shininess:6, specular:0x101418})];
     } else {
       // flat shading: the 3MF shares vertices between faces, so averaged
@@ -1132,7 +1233,7 @@ function buildExactScene(layers){
     + (coverH ? `<br>cover ${coverH.toFixed(0)} mm tall` : '');
   $('prevLegend').innerHTML = mono
     ? `<span><i style="background:${MONO_COL}"></i>Model</span>`
-      + `<span><i style="background:${FRAME_COL}"></i>Frame</span>`
+      + `<span><i style="background:${shown('frame')}"></i>Frame</span>`
     : FILMS.filter(f=>on[f.k]).map(f=>
         `<span><i style="background:${col[f.k]}"></i>${f.nm}</span>`).join('');
   $('prevHud').classList.remove('hidden');
@@ -1346,7 +1447,7 @@ function renderExact(objs, label){
     geo.setIndex(new THREE.BufferAttribute(new Uint32Array(o.F), 1));
     geo.computeVertexNormals();
     const key = (o.name || '').toLowerCase();
-    const colr = key === 'frame' ? FRAME_COL
+    const colr = key === 'frame' ? shown('frame')
                : col[key] !== undefined ? shown(key) : '#C9CDD2';
     const mesh = new THREE.Mesh(geo,
       new THREE.MeshPhongMaterial({color: colr, side: THREE.DoubleSide,
@@ -1372,7 +1473,7 @@ function renderExact(objs, label){
   $('prevHud').classList.remove('hidden');
   $('prevLegend').innerHTML = objs.map(o=>{
     const k = (o.name||'').toLowerCase();
-    const c = k === 'frame' ? FRAME_COL : col[k] !== undefined ? shown(k) : '#C9CDD2';
+    const c = k === 'frame' ? shown('frame') : col[k] !== undefined ? shown(k) : '#C9CDD2';
     return `<span><i style="background:${c}"></i>${o.name}</span>`;
   }).join('');
   $('prevLegend').classList.remove('hidden');
