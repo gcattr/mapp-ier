@@ -47,7 +47,9 @@ function makeEl(id) {
     querySelector() { return null; },
     appendChild() {}, remove() {}, focus() {}, blur() {},
     getContext() { return {}; },
-    getBoundingClientRect() { return {left:0, top:0, width:640, height:420}; },
+    getBoundingClientRect() { return {left:0, top:0, right:640, bottom:420, width:640, height:420}; },
+    scrollIntoView() {},
+    offsetWidth: 380, offsetHeight: 300,
     setPointerCapture() {},
   };
   return el;
@@ -616,6 +618,29 @@ check('the tour steps forward, back, and closes at the end', () => {
   for (let i = 0; i < G.TOUR.length; i++) G.tourNext();
   ok(document.getElementById('tour').classList.contains('hidden'),
      'the tour never closes');
+});
+
+check('every spotlight step points at an element that exists', () => {
+  // the coachmark can only be verified for real in a browser (the DOM stub
+  // gives every element the same fixed rect); here we pin that each step names
+  // a target the page actually has, and that placing it never throws.
+  eq(typeof G.positionTour, 'function', 'positionTour');
+  const fullHtml = fs.readFileSync(path.join(__dirname, 'map2model-console.html'), 'utf8');
+  let withTarget = 0;
+  for (const st of G.TOUR) {
+    if (!('target' in st)) throw new Error('a tour step has no target field: ' + st.t);
+    if (st.target == null) continue;
+    withTarget++;
+    ok(/^#[\w-]+$/.test(st.target), 'target is not a simple #id selector: ' + st.target);
+    const id = st.target.slice(1);
+    // the stub auto-creates any id, so check the real HTML source instead
+    ok(fullHtml.includes('id="' + id + '"'), 'tour target not in the page HTML: ' + st.target);
+  }
+  ok(withTarget >= 4, 'almost every step should spotlight something: ' + withTarget);
+  // stepping through must not throw while it measures and positions
+  G.openTour(0);
+  for (let i = 0; i < G.TOUR.length; i++) { G.positionTour(); G.tourNext(); }
+  G.openTour(0); G.closeTour();
 });
 
 check('the tour is actually opened on page load', () => {

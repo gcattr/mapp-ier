@@ -207,10 +207,32 @@ select{width:auto;min-width:118px;font-family:var(--sans)}
 .links span{display:block;font-size:12px;color:var(--ink-40);margin-top:2px}
 
 /* --- the walkthrough --- */
-.tour{position:fixed;inset:0;z-index:900;background:rgba(14,23,32,.62);
-  display:flex;align-items:center;justify-content:center;padding:18px}
-.tourcard{background:#fff;border-radius:4px;max-width:430px;width:100%;
-  padding:26px 24px 18px;box-shadow:0 24px 60px rgba(0,0,0,.32);text-align:center}
+/* A spotlight tour: a hole punched over the thing each step is about, the rest
+   of the page dimmed by the hole's huge box-shadow, and the card parked next
+   to it with a little pointer. The hole animates from step to step. When a
+   step has no target the hole is a zero-size point in the centre, so the
+   shadow just fills the screen and the card centres like a plain dialog. */
+.tour{position:fixed;inset:0;z-index:900;pointer-events:none}
+.tour.hidden{display:none}
+.tourhole{position:fixed;border-radius:7px;pointer-events:none;
+  box-shadow:0 0 0 9999px rgba(14,23,32,.66);
+  outline:2px solid rgba(255,255,255,.92);outline-offset:3px;
+  transition:top .38s cubic-bezier(.4,0,.2,1),left .38s cubic-bezier(.4,0,.2,1),
+    width .38s cubic-bezier(.4,0,.2,1),height .38s cubic-bezier(.4,0,.2,1),
+    outline-color .2s}
+.tourcard{position:fixed;background:#fff;border-radius:6px;max-width:400px;
+  width:min(400px,calc(100vw - 32px));padding:22px 22px 14px;pointer-events:auto;
+  box-shadow:0 24px 60px rgba(0,0,0,.4);text-align:center;
+  animation:tourpop .3s cubic-bezier(.2,.7,.3,1) both}
+@keyframes tourpop{from{opacity:0;transform:translateY(10px) scale(.985)}
+  to{opacity:1;transform:none}}
+/* the pointer, toggled by a class set in drawTour() */
+.tourcard::after{content:"";position:absolute;width:14px;height:14px;
+  background:#fff;transform:rotate(45deg);display:none}
+.tourcard.pt-up::after{display:block;top:-7px;left:calc(50% - 7px)}
+.tourcard.pt-down::after{display:block;bottom:-7px;left:calc(50% - 7px)}
+.tourcard.pt-left::after{display:block;left:-7px;top:calc(50% - 7px)}
+.tourcard.pt-right::after{display:block;right:-7px;top:calc(50% - 7px)}
 .tourart{font-size:40px;line-height:1;margin-bottom:12px}
 .tourcard h3{font-size:19px;margin:0 0 12px;letter-spacing:-.01em}
 #tourBody{font-size:14px;line-height:1.62;color:var(--ink-70);text-align:left}
@@ -276,8 +298,14 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
   .opt{min-height:44px;font-size:12px}
   .ggrid{grid-template-columns:repeat(2,minmax(0,1fr))}
   input[type=checkbox]{width:22px;height:22px}
-  .tourcard{padding:22px 18px 14px}
-  .tourart{font-size:34px}
+  /* phone: the card is a bottom sheet, JS positioning is overridden, the
+     pointer is dropped. The spotlight hole still shows through above it. */
+  .tourcard{left:10px!important;right:10px!important;bottom:10px!important;
+    top:auto!important;width:auto;max-width:none;padding:20px 18px 12px;
+    border-radius:10px;animation:tourup .32s cubic-bezier(.2,.7,.3,1) both}
+  .tourcard::after{display:none!important}
+  @keyframes tourup{from{opacity:0;transform:translateY(28px)}to{opacity:1;transform:none}}
+  .tourart{font-size:32px;margin-bottom:8px}
   .tourcard h3{font-size:17px}
   #tourBody{font-size:13.5px}
   .tournav button{padding:10px 14px;min-height:44px}
@@ -306,7 +334,8 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
 
 <div class="tour hidden" id="tour" role="dialog" aria-modal="true"
      aria-labelledby="tourTitle">
-  <div class="tourcard">
+  <div class="tourhole" id="tourHole" aria-hidden="true"></div>
+  <div class="tourcard" id="tourCard">
     <div class="tourart" id="tourArt" aria-hidden="true"></div>
     <h3 id="tourTitle"></h3>
     <div id="tourBody"></div>
@@ -694,50 +723,87 @@ $('modeMono').addEventListener('click',()=>{mono=true;
    remembered in localStorage and reachable again from "? Help".            */
 const TOUR = [
   {t:'Make a model of anywhere you like',
-   art:'\uD83C\uDFD9\uFE0F',
+   art:'\uD83C\uDFD9\uFE0F', target:null,
    b:`<p>Six quick steps. It takes about a minute, and nothing here can go
       wrong — nothing is ordered or charged from this page.</p>
       <p>At the end you copy a short code and paste it into your Etsy order.
       That code is how we know which place to print for you.</p>`},
   {t:'1 · Find your place',
-   art:'\uD83D\uDD0D',
+   art:'\uD83D\uDD0D', target:'#q',
    b:`<p>Type a place in the <b>search box</b> on the map — an address, a
       postcode, a city — and press <b>Find</b>.</p>
       <p>Or just drag the map around with your finger until you can see where
       you want.</p>`},
   {t:'2 · Choose your square',
-   art:'\u2B1C',
+   art:'\u2B1C', target:'#span',
    b:`<p>The blue square is what gets printed. Drag the map to move it.</p>
       <p>Use <b>Tile width</b> to say how much of the city fits inside the
       square. A smaller number zooms in on a few streets; a bigger number
       takes in the whole downtown but makes each building smaller.</p>`},
   {t:'3 · Pick the size you ordered',
-   art:'\uD83D\uDCCF',
+   art:'\uD83D\uDCCF', target:'#sizes',
    b:`<p>Under <b>Print size</b>, choose <b>the same size you picked on
       Etsy</b> — Small, Medium or Large.</p>
       <p class="warn">This one matters. If it does not match your order, the
       model will not be the size you paid for.</p>`},
   {t:'4 · Choose your colours',
-   art:'\uD83C\uDFA8',
+   art:'\uD83C\uDFA8', target:'#films',
    b:`<p>Tap a colour button to open the palette, then tap the colour you
       want. There is one for the ground, the water, the parks, the roads, the
       buildings and the border.</p>
       <p>These are real filament colours, so what you pick is what gets
       printed. Happy with the defaults? Leave them alone.</p>`},
   {t:'5 · Have a look first (optional)',
-   art:'\uD83D\uDC41\uFE0F',
+   art:'\uD83D\uDC41\uFE0F', target:'#tabPrev',
    b:`<p>The <b>3D preview</b> tab builds your actual model so you can spin it
       around before ordering.</p>
       <p class="warn">It takes a few minutes — usually two to five. You do not
       have to wait for it. Your colours and your code are ready either way.</p>`},
   {t:'6 · Copy the code into your order',
-   art:'\uD83D\uDCCB',
-   b:`<p>Press <b>Copy</b> at the bottom, then paste it into the
-      <b>personalisation</b> box on your Etsy order.</p>
+   art:'\uD83D\uDCCB', target:'#copy',
+   b:`<p>Press <b>Copy</b>, then paste it into the <b>personalisation</b> box
+      on your Etsy order.</p>
       <p>That is everything. We will print it and post it to you.</p>`},
 ];
 let tourAt = 0;
 const TOUR_SEEN = 'm2m.tour.v1';
+
+/* Punch the spotlight hole over this step's target and park the card beside
+   it with a pointer. No target -> a zero-size hole in the centre, so the
+   dimming shadow just fills the screen and the card centres like a plain
+   dialog. On a phone the card is a CSS bottom sheet and only the hole is
+   placed here. */
+function positionTour(){
+  const hole = $('tourHole'), card = $('tourCard');
+  const W = (window.innerWidth || 1024), H = (window.innerHeight || 768);
+  card.classList.remove('pt-up','pt-down','pt-left','pt-right');
+  const st = TOUR[tourAt] || {};
+  const el = st.target && document.querySelector(st.target);
+  const cr = card.getBoundingClientRect();
+  const cw = cr.width || 380, ch = cr.height || 320;
+  if(!el){
+    hole.style.width = hole.style.height = '0px';
+    hole.style.left = (W/2)+'px'; hole.style.top = (H/2)+'px';
+    card.style.left = Math.max(16,(W-cw)/2)+'px';
+    card.style.top  = Math.max(16,(H-ch)/2)+'px';
+    return;
+  }
+  const r = el.getBoundingClientRect(), pad = 6;
+  hole.style.left = (r.left-pad)+'px';
+  hole.style.top  = (r.top-pad)+'px';
+  hole.style.width  = (r.width+pad*2)+'px';
+  hole.style.height = (r.height+pad*2)+'px';
+  if(W <= 560) return;                     // the CSS bottom sheet places the card
+  const gap = 18;
+  let top;
+  if(r.bottom + gap + ch < H - 8){ top = r.bottom + gap; card.classList.add('pt-up'); }
+  else if(r.top - gap - ch > 8){ top = r.top - gap - ch; card.classList.add('pt-down'); }
+  else { top = Math.max(8, (H-ch)/2); }
+  let left = r.left + r.width/2 - cw/2;
+  left = Math.max(12, Math.min(left, W - cw - 12));
+  card.style.top = top+'px';
+  card.style.left = left+'px';
+}
 
 function drawTour(){
   const st = TOUR[tourAt];
@@ -749,13 +815,31 @@ function drawTour(){
   $('tourBack').classList.toggle('hidden', tourAt===0);
   $('tourNext').textContent = tourAt===TOUR.length-1 ? 'Start' : 'Next';
   $('tourSkip').classList.toggle('hidden', tourAt===TOUR.length-1);
+  const el = st.target && document.querySelector(st.target);
+  if(el && el.scrollIntoView)
+    el.scrollIntoView({block:'center', inline:'center', behavior:'smooth'});
+  positionTour();
+  setTimeout(positionTour, 340);          // re-place once the smooth scroll settles
 }
+let tourRepos = null;
 function openTour(at){
-  tourAt = at || 0; drawTour();
+  tourAt = at || 0;
   $('tour').classList.remove('hidden');
+  drawTour();
+  if(!tourRepos){
+    tourRepos = () => positionTour();
+    addEventListener('resize', tourRepos, {passive:true});
+    // capture: the right-hand panel scrolls on its own and scroll does not bubble
+    addEventListener('scroll', tourRepos, {passive:true, capture:true});
+  }
 }
 function closeTour(){
   $('tour').classList.add('hidden');
+  if(tourRepos){
+    removeEventListener('resize', tourRepos);
+    removeEventListener('scroll', tourRepos, {capture:true});
+    tourRepos = null;
+  }
   // Recorded but not acted on: the tour opens every visit. Kept because it is
   // the one signal that someone has been here before, if that is ever wanted.
   try{ localStorage.setItem(TOUR_SEEN,'1'); }catch(e){}

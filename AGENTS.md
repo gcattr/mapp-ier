@@ -817,6 +817,24 @@ try/catch, because a page that will not load is worse than a forgotten flag.
 **Skip has to look like a button.** As a borderless grey word it read as a
 caption, so the only obvious way out of the card was six taps of Next.
 
+**It is a spotlight, not a centred dialog.** Each `TOUR` step carries a
+`target` (a `#id` selector, or `null` for the intro). `positionTour()` puts
+`#tourHole` — a `position:fixed` div with `box-shadow:0 0 0 9999px` — over the
+target's `getBoundingClientRect()`, so everything but that control is dimmed,
+and parks `#tourCard` above or below it with a CSS pointer (`.pt-up`/`.pt-down`
+etc.). `null` target → a zero-size hole in the centre, so the shadow just
+fills the screen and the card centres (the old behaviour). The hole `top`/
+`left`/`width`/`height` are `transition`ed, so it slides between steps.
+`drawTour()` calls `scrollIntoView({block:'center'})` on the target first (the
+right-hand panel scrolls on its own), and `openTour()` adds `resize` +
+capturing `scroll` listeners that re-run `positionTour()` — removed in
+`closeTour()`. On a phone (`≤560px`) the card is a CSS bottom sheet
+(`!important` over the JS `top`/`left`) and only the hole is placed by JS;
+`prefers-reduced-motion` already kills every transition and animation
+page-wide. `test_console.js` can only check that each step's `target` id is in
+the HTML and that stepping through never throws — the DOM stub gives every
+element the same fixed rect, so real placement is a browser check.
+
 It is written for someone who has never used anything like this — an Etsy
 buyer, on a phone, who wants a model of their street. **No jargon.** A test
 fails the build if the copy contains "3mf", "filament slot", "AMS", "exporter",
@@ -905,7 +923,7 @@ a call to a function that no longer exists passes cleanly. This bit twice
 `test_console.js` is that harness. No dependencies, no network, no browser:
 
 ```bash
-node test_console.js                    # 59 checks, exit 0 = clean
+node test_console.js                    # 60 checks, exit 0 = clean
 node test_console.js old-console.html   # point it at an older copy
 ```
 
@@ -947,7 +965,7 @@ something instead of asserting against itself.
   line in `buildCmd()`; left for a session that can re-run a Toronto tile and
   eyeball the export.
 - **macOS pass, 2026-09-01.** Node 26.8.1 installed via Homebrew, so
-  `node test_console.js` runs here → 59/59; `python3 test_export.py` → 42/42.
+  `node test_console.js` runs here → 60/60; `python3 test_export.py` → 42/42.
   `verify_bambu.py` put all three plate shapes through the real Bambu Studio CLI
   on macOS and passed (re-run after the frame/cover signature change), and its
   `find_bambu()` was widened to cover `Bambu Studio.app` (with a space),
