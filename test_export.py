@@ -94,6 +94,50 @@ def _cover_is_petg():
 check("the cover is PETG, both halves of it", _cover_is_petg)
 
 
+def _half_dims(left):
+    """out_x, out_y, total_z of the assembled cover, read off one half.
+
+    build_box lays the two halves side by side with a print gap, so a half
+    spans out_x/2 in x, out_y in y, total_z in z.
+    """
+    V = left[0]
+    return (2 * (V[:, 0].max() - V[:, 0].min()),
+            V[:, 1].max() - V[:, 1].min(),
+            V[:, 2].max() - V[:, 2].min())
+
+
+def _cover_is_a_cube():
+    # A flat model (10 mm tall) would give a stubby ~25 mm lid; box_cube grows
+    # it to a cube so it still fills a cube shipping box.
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    assert cfg.box_cube, "box_cube should default on"
+    out_x, out_y, total_z = _half_dims(M.build_box(cfg, 200.0, 200.0, 10.0)[0])
+    cube = min(max(out_x, out_y), cfg.build_volume_mm)
+    assert abs(total_z - cube) < 0.5, (out_x, out_y, total_z, cube)
+    assert total_z <= cfg.build_volume_mm + 1e-6, total_z
+
+
+def _cube_never_shrinks_a_tall_cover():
+    # A 300 mm model already needs a cover taller than its footprint; the cube
+    # rule must not pull it back down (it would clip the model).
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    plain = _half_dims(M.build_box(M.Config(bbox=(0, 0, 1, 1), box_cube=False),
+                                   200.0, 200.0, 300.0)[0])[2]
+    cubed = _half_dims(M.build_box(cfg, 200.0, 200.0, 300.0)[0])[2]
+    assert abs(plain - cubed) < 0.5, (plain, cubed)
+
+
+def _no_box_cube_stays_short():
+    cfg = M.Config(bbox=(0, 0, 1, 1), box_cube=False)
+    total_z = _half_dims(M.build_box(cfg, 200.0, 200.0, 10.0)[0])[2]
+    assert total_z < 60, total_z          # lip + 10 + headroom + wall, no cube
+
+
+check("the cover grows to a cube for a flat model", _cover_is_a_cube)
+check("the cube rule never shrinks a tall cover", _cube_never_shrinks_a_tall_cover)
+check("--no-box-cube leaves the cover its natural height", _no_box_cube_stays_short)
+
+
 def _picks_are_honoured():
     cfg = M.Config(bbox=(0, 0, 1, 1), filaments={"buildings": "basic_red"})
     assert M.filament_of(cfg, "buildings")[3] == "#C12E1F", "a pick was ignored"

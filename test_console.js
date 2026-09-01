@@ -401,11 +401,19 @@ check('an over-tall cover trips the build-volume warning', () => {
      'no warning for a 260 mm cover: ' + note.innerHTML);
   ok(/cover/i.test(note.innerHTML), 'the warning does not name the cover');
 });
-check('a cover close to the ceiling warns without blocking', () => {
-  sceneWithCover(220);                       // over 85% of 250, under 250
+check('a cover genuinely near the ceiling warns without blocking', () => {
+  sceneWithCover(238);                       // past 0.92*250, under 250
   const note = document.getElementById('sizeNote');
   ok(/close to the limit/i.test(note.innerHTML),
-     'no near-limit warning for a 220 mm cover: ' + note.innerHTML);
+     'no near-limit warning for a 238 mm cover: ' + note.innerHTML);
+});
+check('a normal cube cover does not warn', () => {
+  // ~219 mm is the cube cover for a 200 mm tile - normal, not near-limit.
+  document.getElementById('sizeNote').innerHTML = '';
+  sceneWithCover(219);
+  const note = document.getElementById('sizeNote');
+  ok(!/close to the limit/i.test(note.innerHTML),
+     'a 219 mm cube cover was flagged as near-limit: ' + note.innerHTML);
 });
 check('a comfortable cover produces no warning at all', () => {
   document.getElementById('sizeNote').innerHTML = '';
@@ -654,6 +662,16 @@ check('removing the Detail panel did not change what gets built', () => {
   ok(/--roofs all/.test(cmd), 'the command lost --roofs: ' + cmd);
   ok(/--max-ridge-frac 0.98/.test(cmd), 'the command lost the ridge fraction: ' + cmd);
   ok(!/--source osm|--lod 1/.test(cmd), 'the command picked up a non-default: ' + cmd);
+});
+
+check('the command caps building height at the print size', () => {
+  // Building stretch must not push a skyline past the size the buyer paid
+  // for, and the cube cover would grow with it. --max-building-mm == --size.
+  const cmd = G.buildCmd();
+  const size = (cmd.match(/--size (\d+)/) || [])[1];
+  ok(size, 'no --size in the command: ' + cmd);
+  ok(new RegExp('--max-building-mm ' + size + '(\\s|$)').test(cmd),
+     '--max-building-mm is missing or does not match --size: ' + cmd);
 });
 
 /* ---------------- camera ---------------- */

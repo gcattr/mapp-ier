@@ -84,6 +84,7 @@ def cfg_from(q):
     kw = dict(
         bbox=tuple(bbox),
         size_mm=num("size", 200.0),
+        max_building_mm=num("max_building_mm", 0.0),
         z_exaggeration=num("zexag", 1.0),
         building_scale=num("building_scale", 1.0),
         terrain=flag("terrain", True),
@@ -97,6 +98,12 @@ def cfg_from(q):
         source=q.get("source", ["overture"])[0],
         frame=True,
         water_in_frame=True,
+        # Build the real plates the customer command builds: --split writes the
+        # frame/water/cover siblings run_job() reads back, --box makes the
+        # cover. Without --box the console's cover-vs-build-volume check had
+        # nothing to measure and the cube cover was invisible in the preview.
+        split=True,
+        box=flag("box", True),
         # the preview nests the frame around the model; the command the
         # customer copies leaves it parked beside, which is how it prints
         frame_inplace=True,

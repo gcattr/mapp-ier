@@ -13,7 +13,7 @@ files.
 | `serve.py` | Local HTTP server: serves the console AND runs the exporter behind it. |
 | `map2model-console.html` | The web console. Single file, no build step. |
 | `test_console.js` | Offline harness for the console: stubs the DOM, Leaflet and three.js and invokes every top-level function. `node test_console.js`. |
-| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 26 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
+| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 29 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
 | `verify_bambu.py` | Loads each plate shape through the Bambu Studio CLI, has it re-export, and reads the filaments and per-part extruders back out. Skips cleanly when Bambu Studio is not installed. See **Verifying it**. |
 | `bambu_p1s_0.4.json` | A P1S 0.4 nozzle project config that Bambu Studio itself wrote (v02.05.00.66). `_project_settings()` widens its per-slot lists and writes our filaments in. Version-coupled — see **Known gaps**. |
 | `landmarks.json` | Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it **silently** when it is absent — so if it goes missing the CN Tower renders as straight prisms in preview *and* export, with no warning anywhere. It is tracked in git for exactly that reason. |
@@ -436,12 +436,26 @@ The model itself lands well inside that: the largest print-size button is
 (200 mm model + 2×clearance + 2×6 mm frame ≈ 213 mm).
 
 The console *warns*, it does not block: over 250 mm it writes a
-customer-readable `sizeNote` ("This will not print"), and past `250 × 0.85` a
-"close to the limit" note, but the build still runs. `test_console.js` pins
-that behaviour ("a cover close to the ceiling warns without blocking").
+customer-readable `sizeNote` ("This will not print"), and past `250 × 0.92`
+(`COVER_WARN`) a "close to the limit" note, but the build still runs.
+`test_console.js` pins that behaviour ("a cover genuinely near the ceiling
+warns without blocking"). The threshold used to be `250 × 0.85`; the cube
+cover (below) made ~219 mm a *normal* height for a 200 mm tile, not a
+near-limit one, so the line moved up.
 
-Cover height = `2.4 + tallest building + 10.0 + 3.0` mm, so it overflows once
-the model passes ~240 mm. Building stretch is what usually causes this.
+Model height is capped at the print size. The console passes
+`--max-building-mm <size>` (100 / 150 / 200) on every build, so building
+stretch can't push a skyline past the footprint number the buyer paid for —
+and can't drag the cube cover up with it. CLI users get no cap unless they
+pass the flag.
+
+The cover is a **cube** (`box_cube`, on by default; `--no-box-cube` opts out).
+`build_box` grows a short cover up until its height equals its footprint — a
+flat tile would otherwise ship as a stubby lid with a fistful of dead air
+above it in a cube shipping box. It never *shrinks* a tall cover (that would
+clip the model) and it's clamped to `build_volume_mm`. With the height cap in
+place the cube side is footprint-bound: ~219 mm at 200, ~168 at 150, ~119 at
+100.
 
 Resolution: aim under 8 m/mm. `--min-feature 0.9` widens anything thinner so it
 prints, which is why a 2 m mast comes out proportionally fat on a coarse tile.
@@ -455,9 +469,19 @@ with only the 0.4 mm slip fit to move in. Four corner posts carry the ceiling so
 a knock can't press it onto a spire. Defaults: 3.0 mm walls, 2.4 mm lip/rib,
 6.0 mm reach, 10.0 mm headroom.
 
+**It's a cube** unless `--no-box-cube`. The walls and ceiling rise to make the
+closed cover as tall as it is wide (clamped to `build_volume_mm`); the groove
+and rib stay pinned to the frame rim, and the corner posts just get taller.
+The point is packing: the shop's shipping boxes are inch cubes (5/7/9/11 …),
+so a full-height cover for every tile — flat or not — drops into the same box
+with bubble wrap as the buffer, then double-boxes into the next size up. A
+tall model that already needs a cover taller than its footprint keeps it;
+the cube rule only ever adds height.
+
 **Not yet done:** the halves butt at the seam (a lapped joint would resist
-shear better), and each half prints as a shell with a ~219 mm ceiling to bridge
-— it needs rotating onto a side wall in the slicer, or in the exporter.
+shear better), and each half now prints as a shell with a full cube's ceiling
+to bridge — it needs rotating onto a side wall in the slicer, or in the
+exporter. The cube makes this more pressing, not less.
 
 ## The console — hard-won details
 
@@ -518,6 +542,12 @@ does). `serve.py` was looking for `_frame` and `_water`, so **no `cover_` layer
 ever reached the browser** and the console's cover-versus-250 mm check — the
 thing that stops an unprintable cover reaching a customer — passed on every
 tile by measuring an empty list. `serve.py` now loads all three suffixes.
+
+And it now actually *builds* them: `cfg_from()` sets `split=True` and
+`box=True`, so a preview runs the same `--split --box` the copied command
+does. Before, the preview built one unsplit file with no cover at all, so the
+suffix-loading above still had nothing to load — the cube-cover check only
+started measuring anything once the preview built a cover.
 
 That makes the console's own filter matter: it skipped `box_` only, a name the
 exporter no longer emits. Drawn, the cover is a shell wider and taller than the
@@ -656,7 +686,7 @@ What it covers is everything *after* geometry: which filament each layer gets,
 what lands in the 3MF, and whether a slicer can read it back.
 
 ```bash
-python test_export.py                   # 26 checks, exit 0 = clean
+python test_export.py                   # 29 checks, exit 0 = clean
 ```
 
 Every check in it is a bug that shipped. The cover one in particular: the cover
@@ -686,7 +716,7 @@ a call to a function that no longer exists passes cleanly. This bit twice
 `test_console.js` is that harness. No dependencies, no network, no browser:
 
 ```bash
-node test_console.js                    # 45 checks, exit 0 = clean
+node test_console.js                    # 48 checks, exit 0 = clean
 node test_console.js old-console.html   # point it at an older copy
 ```
 
@@ -728,14 +758,16 @@ something instead of asserting against itself.
   line in `buildCmd()`; left for a session that can re-run a Toronto tile and
   eyeball the export.
 - **macOS pass, 2026-09-01.** Node 26.8.1 installed via Homebrew, so
-  `node test_console.js` runs here → 45/45; `python3 test_export.py` → 26/26.
+  `node test_console.js` runs here → 48/48; `python3 test_export.py` → 29/29.
   `verify_bambu.py` put all three plate shapes through the real Bambu Studio CLI
   on macOS and passed, and its `find_bambu()` was widened to cover
   `Bambu Studio.app` (with a space), `~/Applications`, and a `PATH` fallback.
-  `cmd2mac.py` was added for the `python` → `python3` rewrite. Still not done:
-  the in-browser console has never been driven end to end here (browser tools
-  were off for the session), and no real CLI build has run since the
-  parallel-fetch change — see the slow-preview bullet.
+  `cmd2mac.py` was added for the `python` → `python3` rewrite. The in-browser
+  console *has* now been driven end to end here — a real Toronto preview built
+  and rendered correctly (this is also what caught the inside-out `FrontSide`
+  bug and confirmed the cube cover). A real `--split --box` build runs on every
+  preview now (`serve.py` `cfg_from`), so the parallel-fetch path has had a
+  live exercise; a bare-CLI invocation still has not.
 - **A preview is still slow, just no longer additive.** The six Overture scans
   now run at once (see **Fetching**), so a build costs the slowest query rather
   than the sum — a 1.6 km London tile was 11m15s end to end, of which 4m10s was

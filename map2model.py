@@ -275,6 +275,10 @@ class Config:
     cover_lip_mm: float = 6.0        # how far the lips reach under the frame
     cover_lip_thickness_mm: float = 2.4
     box_headroom_mm: float = 10.0    # clear air above the tallest building
+    box_cube: bool = True            # grow the cover up to a cube so a flat
+                                     # tile still fills a cube shipping box;
+                                     # never shrinks a tall cover, clamped to
+                                     # build_volume_mm. --no-box-cube opts out.
     # P1S. The machine is 256 mm in all three axes, but 250 is the working
     # limit for anything printed here - it leaves margin and it is one number
     # to remember. The console has always used 250; this used to say 256, so
@@ -1858,6 +1862,20 @@ def build_box(cfg, W, H, model_top_mm):
     top_z = lip_t + clear_z
     total_z = top_z + wall
 
+    # A cube cover. The model footprint is square and its height is capped
+    # (the console passes --max-building-mm), so without this a flat tile ships
+    # as a stubby lid with a fistful of dead air above it inside a cube
+    # shipping box. Raise the cover to a cube - never shrink it, a taller model
+    # keeps its taller cover - so every tile fills its box the same way.
+    # Clamped to the build volume; the walls and ceiling rise, the groove and
+    # rib stay pinned to the frame.
+    if cfg.box_cube:
+        cube = min(max(out_x, out_y), cfg.build_volume_mm)
+        if cube > total_z:
+            total_z = cube
+            top_z = total_z - wall
+            clear_z = top_z - lip_t
+
     def half(sign, dx):
         """One shell: closed on its end and both long sides, open at the seam."""
         x_out_lo = dx - out_x / 2 if sign < 0 else dx
@@ -1910,10 +1928,14 @@ def build_box(cfg, W, H, model_top_mm):
         print(f"         groove on all four sides: lip {lip_reach:.1f} mm under, "
               f"rib {rib_reach:.1f} mm over, {wall:.1f} mm walls",
               file=sys.stderr)
-        print(f"         closed: {out_x:.1f} x {out_y:.1f} x {total_z:.1f} mm, "
-              f"{2 * clr:.2f} mm play in every direction", file=sys.stderr)
-        print(f"         {cfg.box_headroom_mm:.1f} mm of air above the tallest "
-              f"point; corner posts carry the ceiling", file=sys.stderr)
+        shape = "cube" if cfg.box_cube else "box"
+        print(f"         closed {shape}: {out_x:.1f} x {out_y:.1f} x "
+              f"{total_z:.1f} mm, {2 * clr:.2f} mm play in every direction",
+              file=sys.stderr)
+        air = top_z - lip_t - model_top_mm
+        print(f"         {air:.1f} mm of air above the tallest point "
+              f"(>= {cfg.box_headroom_mm:.1f} mm headroom); corner posts carry "
+              f"the ceiling", file=sys.stderr)
         BV = cfg.build_volume_mm
         if max(out_y, out_x / 2) > BV or total_z > BV:
             print(f"  [warn] the cover does not fit a {BV:.0f} mm build volume "
@@ -3190,6 +3212,9 @@ def main():
                     help="slip fit between the box halves (default 0.4)")
     fr.add_argument("--box-headroom", type=float, default=10.0,
                     help="clear air above the tallest building (default 10.0)")
+    fr.add_argument("--no-box-cube", action="store_true",
+                    help="do not grow the cover up to a cube; leave it just "
+                         "tall enough to clear the model plus headroom")
     fr.add_argument("--water-in-frame", action="store_true",
                     help="print the water as the frame's floor (2 filaments in "
                          "one plate) and cut the water clean out of the land "
@@ -3256,6 +3281,7 @@ def main():
                  cover_lip_mm=a.cover_lip,
                  box_clearance_mm=a.box_clearance,
                  box_headroom_mm=a.box_headroom,
+                 box_cube=not a.no_box_cube,
                  filaments=parse_filaments(a.filaments),
                  bambu_project=not a.no_bambu_project,
                  printer_model=a.printer, nozzle_mm=a.nozzle,

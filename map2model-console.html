@@ -847,6 +847,10 @@ function buildCmd(){
   const b=bboxOf(), v=S(), a=[];
   a.push(`--bbox ${b.w.toFixed(4)} ${b.s.toFixed(4)} ${b.e.toFixed(4)} ${b.n.toFixed(4)}`);
   a.push(`--size ${sizeMM}`);
+  // Cap the model's height at its own footprint number. Building stretch can
+  // otherwise push a skyline past the print size the buyer paid for, and the
+  // cube cover would grow with it. 100/150/200 mm print, 100/150/200 mm tall.
+  a.push(`--max-building-mm ${sizeMM}`);
   if(v.zex!==1)    a.push(`--zexag ${v.zex.toFixed(1)}`);
   if(v.bscale!==1) a.push(`--building-scale ${v.bscale.toFixed(1)}`);
   if(!$('terrain').checked) a.push('--no-terrain');
@@ -1372,7 +1376,8 @@ function exactParams(){
   const b = bboxOf(), v = S();
   return new URLSearchParams({
     bbox: [b.w,b.s,b.e,b.n].map(n=>n.toFixed(6)).join(','),
-    size: sizeMM, zexag: v.zex, building_scale: v.bscale,
+    size: sizeMM, max_building_mm: sizeMM,
+    zexag: v.zex, building_scale: v.bscale,
     terrain: $('terrain').checked ? 1 : 0,
     water: on.water?1:0, greenery: on.greenery?1:0,
     roads: on.roads?1:0, buildings: on.buildings?1:0,
@@ -1479,6 +1484,11 @@ function buildExactScene(layers){
   // Police the printer envelope. The cover is the tall part, and a model that
   // is fine on its own can push the cover past what the machine can build.
   const BV = 250;
+  // The cover is a cube now (build_box, --box-cube), so its height tracks its
+  // own footprint, not the model: ~219 mm for a 200 mm tile, ~168 for 150,
+  // ~119 for 100. That is normal, not "close to the limit" - only warn when
+  // something has pushed it well past a cube, near the real ceiling.
+  const COVER_WARN = BV * 0.92;
   const tooBig = layers.filter(L => L.size &&
     (Math.max(L.size[0], L.size[1]) > BV || L.size[2] > BV));
   const cover = layers.filter(L => L.name.startsWith('cover_'));
@@ -1491,7 +1501,7 @@ function buildExactScene(layers){
       ${worst.size[2].toFixed(0)} mm, past the ${BV} mm the printer can build.
       Choose a smaller print size, or lower the building stretch.`;
     $('sizeNote').className = 'hint sizewarn';
-  } else if(coverH > BV * 0.85){
+  } else if(coverH > COVER_WARN){
     $('sizeNote').innerHTML = `<strong>Close to the limit.</strong> The cover is
       ${coverH.toFixed(0)} mm tall against a ${BV} mm ceiling. Any more building
       stretch and it will not print.`;
