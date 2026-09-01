@@ -938,9 +938,12 @@ function activeFilms(){
   out.push({k:'frame', nm:'Frame', note:'border + water plate', locked:true});
   return out;
 }
-/* The span slider tops out at 3 km for a city; a race circuit needs more
-   room (Spa is ~7 km corner to corner), so route mode widens it. */
-let MAXSPAN = 3000;
+/* How wide the tile is allowed to get, per mode. A city stays a
+   neighbourhood; a race circuit is ~7 km corner to corner; a relief map can
+   be a whole national park (Banff is ~180 km across). */
+const SPAN_MAX  = { city: 3000, route: 8000, terrain: 300000 };
+const SPAN_STEP = { city: 50,   route: 50,   terrain: 1000 };
+let MAXSPAN = SPAN_MAX.city;
 function setMode(m){
   mode = (m === 'terrain' || m === 'route') ? m : 'city';
   $('modes').querySelectorAll('button').forEach(x =>
@@ -951,8 +954,10 @@ function setMode(m){
   ['rowBscale','rowTerrainChk'].forEach(id =>
     $(id).classList.toggle('hidden', terr || route));
   $('routePanel').classList.toggle('hidden', !route);
-  MAXSPAN = route ? 8000 : 3000;
+  MAXSPAN = SPAN_MAX[mode];
   $('span').max = MAXSPAN;
+  $('span').step = SPAN_STEP[mode];
+  if(spanM > MAXSPAN){ spanM = MAXSPAN; $('span').value = spanM; placeRect(false); }
   if(route && drawing) $('btnDraw').click();      // drop the square-draw mode
   if(!route && routeDrawing) $('routeDraw').click();
   drawRouteLine();                                 // show/keep the path line
@@ -1313,6 +1318,13 @@ function sync(){
     $('rWarn').innerHTML = '<span class="chip-ok">circuit scale</span>';
     $('sizeNote').innerHTML = `A ${(spanM/1000).toFixed(1)} km circuit at 1:${ratio.toLocaleString()}.
       The path is drawn at least ${Math.max(routeWidthM(), Math.ceil(lost)).toFixed(0)} m wide so it prints cleanly.`;
+    $('sizeNote').className = 'hint sizeok';
+  } else if(mpmm > 8 && mode === 'terrain'){
+    // A relief map is landform, not streets. It has no fine detail to lose at
+    // scale, so this is a note - the point is to fit a whole range or park.
+    $('rWarn').innerHTML = '<span class="chip-ok">relief scale</span>';
+    $('sizeNote').innerHTML = `A ${(spanM/1000).toFixed(0)} km relief map at 1:${ratio.toLocaleString()}.
+      Landform reads fine at this scale; anything smaller than a hill is smoothed away.`;
     $('sizeNote').className = 'hint sizeok';
   } else if(mpmm > 8){
     $('rWarn').innerHTML = '<span class="chip-warn">too coarse — detail will be lost</span>';

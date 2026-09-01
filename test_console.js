@@ -819,9 +819,12 @@ check('setMode route rewrites the command and the preview params', () => {
   G.setRoute([], '');
   ok(!/--mode|--route/.test(G.buildCmd()), 'setMode(city) did not undo route');
 });
-check('the span slider opens up for a race circuit', () => {
+check('the span slider opens up for a circuit and wide open for a relief map', () => {
   G.setMode('route');
   eq(String(document.getElementById('span').max), '8000', 'route mode did not widen the span slider');
+  G.setMode('terrain');
+  ok(+document.getElementById('span').max >= 100000,
+    'terrain mode must allow a whole-park tile: ' + document.getElementById('span').max);
   G.setMode('city');
   eq(String(document.getElementById('span').max), '3000', 'city mode did not restore the span slider');
 });

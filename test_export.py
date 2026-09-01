@@ -281,7 +281,11 @@ def _band_filaments_default_down_the_ramp():
     M.parse_filaments("terrain_4=basic_blue")     # must not raise
 
 
-def _bands_are_nested_solids():
+def _slices_follow_the_relief():
+    """The bands are colour SLICES of a smooth relief, not stepped plateaus:
+    each slice is watertight, solid from the bed, its footprint shrinks and
+    its lid rises going up - and its top surface DRAPES over the terrain
+    instead of being one flat plateau value."""
     from shapely.geometry import box
     proj = _Proj(800.0)
     M.terr_min[0] = 0.0
@@ -292,25 +296,26 @@ def _bands_are_nested_solids():
     out = M.build_terrain_bands(cfg, proj, _Dome(proj), S, bbox_poly, [])
     names = [n for n, _ in out]
     assert names[0] == "terrain" and names[1:] == ["terrain_2", "terrain_3", "terrain_4"], names
-    areas, tops = [], []
+    spans, tops = [], []
     for n, vf in out:
         V = vf[0]
-        assert _open_edges(vf) == 0, f"{n} band is not closed"
+        assert _open_edges(vf) == 0, f"{n} slice is not closed"
         assert V[:, 2].min() <= 1e-6, f"{n} is not solid from the bed"
-        # footprint area from the z=0 ring
-        base = V[abs(V[:, 2] - V[:, 2].min()) < 1e-6]
-        areas.append((base[:, 0].max() - base[:, 0].min()) *
-                     (base[:, 1].max() - base[:, 1].min()))
+        spans.append((V[:, 0].max() - V[:, 0].min()) *
+                     (V[:, 1].max() - V[:, 1].min()))
         tops.append(V[:, 2].max())
-    # higher bands cover less ground and stand taller
-    for i in range(1, len(areas)):
-        assert areas[i] <= areas[i - 1] + 1.0, (i, areas)
-        assert tops[i] > tops[i - 1] - 1e-6, (i, tops)
+        # the top surface (non-bed vertices) is not one flat value - it drapes
+        surf = V[V[:, 2] > 1e-6, 2]
+        assert surf.max() - surf.min() > 3.0, \
+            f"{n} looks like a flat plateau ({surf.max() - surf.min():.2f} mm of relief)"
+    for i in range(1, len(spans)):
+        assert spans[i] <= spans[i - 1] + 1.0, ("footprint grew going up", i, spans)
+        assert tops[i] > tops[i - 1] - 1e-6, ("lid did not rise", i, tops)
 
 
 check("elevation band keys terrain_2..5 are recognised", _band_keys_recognised)
 check("bands default down the ramp and take a pick", _band_filaments_default_down_the_ramp)
-check("terrain bands are nested solids, taller and smaller going up", _bands_are_nested_solids)
+check("terrain slices drape on the relief and nest, not stepped plateaus", _slices_follow_the_relief)
 
 
 # ------------------------------------------------------------- route mode

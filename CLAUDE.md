@@ -520,19 +520,34 @@ shaped frame and cube cover; the buyer asked for a picture-frame border around
 the relief, so the plate strategy is the city's (4-colour land plate +
 frame/water plate + cover), not a bare model.
 
-**Elevation bands.** `--terrain-bands N` (1–5, default 1 = smooth single
-colour). `build_terrain_bands()` is a *third* terrain builder — `build_drape`
-never sees a grid and `build_terrain` is rectangular-only. It samples a 160-wide
-elevation grid, and for each of N thresholds run-length-encodes the cells at or
-above it into row boxes, `unary_union`s them (a few hundred boxes, not tens of
-thousands), `.simplify`s, clips to `bbox_poly`, cuts the water out, and
-`prism`s the region **solid from the bed** up to the top of its own elevation
-range. The bands nest and lean on each other like a physical contour model —
-they are *not* hollow z-slices. Band 1 is the object `terrain`; `terrain_2..5`
-default down `TERRAIN_RAMP` (lowland green → upland green → tan → grey rock →
-snow, all stock keys). A 5th band spills to its own `_plate2` file;
-`serve.py` now globs every `<stem>_*.3mf` sibling instead of a fixed suffix
-list so it reaches the preview.
+**It scales to a whole park.** `SPAN_MAX.terrain` in the console is **300 km** —
+the buyer can drag a tile over the entire Banff National Park and get one
+relief map. `terrain_zoom_for()`'s floor dropped from z12 to **z8** (~600 m/px)
+so a 180 km tile is ~4 terrarium PNGs, not thousands. Past 8 m/mm the console
+swaps the "too coarse" warning for a neutral "relief scale" note — landform
+has no fine detail to lose. The relief slider ("Tallest point = N mm") is what
+makes 2 km of real relief over 180 km readable in the hand.
+
+**Elevation slices, not steps.** `--terrain-bands N` (1–5, default 1 = smooth
+single colour). `build_terrain_bands()` is a *third* terrain builder — it
+samples a contour grid (`terrain_grid × 0.7`, clamped 160–320), and for each of
+N elevation thresholds run-length-encodes the cells at or above it into row
+boxes, `unary_union`s (a few hundred boxes, not tens of thousands),
+`.simplify`s, clips to `bbox_poly`, cuts the water out — then **drapes** the
+region as a solid slab from the bed up to `min(terrain, edges[k+1])` via
+`build_drape(..., flat_bottom=0.0, top_cap_mm=cap)`. So within its own band a
+slice's top *follows the real relief*; above it the top is a flat lid the next
+slice up hides. The finished model's visible surface is the true smooth terrain
+with the colour changing at contour lines — **not** stepped plateaus (that was
+the earlier `prism`-to-`edges[k+1]` design, which read as a ziggurat). Slices
+still nest and lean on each other; water is cut clean through every one. Slice 1
+is the object `terrain`; `terrain_2..5` default down `TERRAIN_RAMP` (lowland
+green → upland green → tan → grey rock → snow, all stock keys). A 5th slice
+spills to its own `_plate2` file; `serve.py` globs every `<stem>_*.3mf` sibling.
+
+`build_drape`'s `top_cap_mm` is the one new knob: `np.minimum(top_z, cap)` on
+the draped top ring, nothing else. The top slice passes `cap=None` and follows
+the relief to the peak.
 
 `filament_of()` folds `terrain_2..terrain_5` to a ramp default or a buyer
 pick (`_band_index()`); `parse_filaments()` accepts those keys; they are
@@ -592,10 +607,10 @@ is ~7 km corner to corner. At that scale the "too coarse" warning is replaced
 by a neutral "circuit scale" note: a ribbon on relief has no fine detail to
 lose, and `--min-feature` keeps the path printably wide.
 
-**Strava OAuth is not wired.** It needs the shop to register an API app and
-deploy a fixed redirect URL, which can't be done or tested from here. GPX
-export from Strava covers the same ground with no setup, so the console points
-at the file upload instead.
+**No Strava integration — a route is a track you bring or draw.** No OAuth, no
+API app, nothing to register. The three inputs above (name a circuit, upload a
+`.gpx`, or click a path on the map) are the whole story; a Strava ride is just
+a GPX export like any other. The console's route panel says exactly this.
 
 **Blank-tile guard.** `run()`'s "never write a blank tile" check (lines
 ~3147+) now also passes when route mode has a resolved path, or terrain mode
@@ -912,8 +927,7 @@ something instead of asserting against itself.
   inside-out `FrontSide` bug and confirmed the cube cover. A real
   `--split --box` build runs on every preview now (`serve.py` `cfg_from`), so
   the parallel-fetch path has had a live exercise; a bare-CLI invocation still
-  has not. `verify_bambu.py` has **not** been re-run on a hex/circle or a
-  terrain-band plate.
+  has not. `verify_bambu.py` has **not** been re-run on a hex/circle plate.
 - **Route mode, phase 4.** A real `--mode route --route "..."` CLI build ran
   end to end near Eau Rouge: watertight ribbon, draped on the relief (13 mm of
   climb across the tile), cube cover, `terrain`+`route` on the main plate.
@@ -924,6 +938,15 @@ something instead of asserting against itself.
   so the query is only exercised by the `stitchOsmWays` unit test. Also
   untested: the console's draw-on-map click flow and GPX file input in a real
   browser (both are unit-tested via `parseGpx` / `stitchOsmWays`).
+- **Terrain slices, phase 4b.** `--mode terrain --terrain-bands` now drapes
+  each slice on the relief instead of `prism`ing it flat — the model reads as a
+  smooth relief map with colour contours, not a staircase. A real 40 km Banff
+  build: four slices, each watertight, top surface draping 7.6–9.7 mm, lids
+  nesting 10.6 → 33.3 mm. `verify_bambu.py` PASSed on that plate (four terrain
+  slices → slots 1–4) — first time a terrain-band plate has been verified
+  through Bambu. `terrain_zoom_for()` picks z8 for a 180 km tile. **Not** yet
+  seen: a genuinely park-sized (100 km+) tile built end to end, and the new
+  draped slices in the browser preview.
 - **A preview is still slow, just no longer additive.** The six Overture scans
   now run at once (see **Fetching**), so a build costs the slowest query rather
   than the sum — a 1.6 km London tile was 11m15s end to end, of which 4m10s was

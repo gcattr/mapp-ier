@@ -1091,6 +1091,8 @@ def terrain_zoom_for(cfg):
     terrain_grid was: the mesh was interpolating data that was not there.
     Bigger tiles do not need the detail and would download hundreds of tiles
     for it, so this scales with the tile instead of being cranked up globally.
+    The floor is z8 (~600 m/px), not z12: a relief map of a whole national
+    park is a legitimate tile, and z12 over 150 km is thousands of PNGs.
     """
     minx, miny, maxx, maxy = cfg.bbox
     lat = math.radians((miny + maxy) / 2.0)
@@ -1098,7 +1100,7 @@ def terrain_zoom_for(cfg):
                  (maxy - miny) * 110540.0)
     want_m = max(span_m / max(cfg.terrain_grid, 2), 1.0)   # metres per sample
     z = math.log2(156543.03392 * math.cos(lat) / want_m)
-    return int(max(12, min(cfg.terrain_zoom_max, round(z))))
+    return int(max(8, min(cfg.terrain_zoom_max, round(z))))
 
 
 class Terrain:
@@ -1913,12 +1915,15 @@ def build_terrain(cfg, proj, terr, S, water_polys=None):
 
 
 def build_drape(cfg, proj, terr, S, polys, thickness_mm, embed_mm,
-                cell_m=None, label="draping", flat_bottom=None):
+                cell_m=None, label="draping", flat_bottom=None, top_cap_mm=None):
     """
     Slab that follows the terrain: bottom sunk `embed` into it, top `thickness`
     above. Large polygons are grid-split first so they actually follow relief.
     `flat_bottom` pins the underside to a constant z instead, which is how the
-    cut-out terrain plinth is built.
+    cut-out terrain plinth is built. `top_cap_mm` clamps the top DOWN to a
+    constant z where the relief rises past it - that is how an elevation slice
+    keeps a smooth terrain-following surface within its own band and a flat lid
+    above (hidden under the next slice up).
     """
     from shapely.geometry import box
     acc = MeshAccum()
@@ -1958,7 +1963,10 @@ def build_drape(cfg, proj, terr, S, polys, thickness_mm, embed_mm,
                                    (np.full(n, flat_bottom)
                                     if flat_bottom is not None
                                     else gz - embed_mm)])
-            top = np.column_stack([px, py, gz + thickness_mm])
+            top_z = gz + thickness_mm
+            if top_cap_mm is not None:
+                top_z = np.minimum(top_z, top_cap_mm)
+            top = np.column_stack([px, py, top_z])
             V = np.vstack([bot, top])
             faces = [F[:, ::-1], F + n]
             _walls(faces, lens, n)
@@ -2013,19 +2021,36 @@ def _rle_union(mask, xe, ye):
     return unary_union(boxes) if boxes else Polygon()
 
 
-def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
-    """Relief cut into `cfg.terrain_bands` stepped plateaus, each its own
-    object so it gets its own filament (TERRAIN_RAMP / a buyer pick).
+def _flatten_polys(geom):
+    """A Polygon / MultiPolygon / collection -> list of non-trivial Polygons."""
+    from shapely.geometry import Polygon
+    if geom is None or geom.is_empty:
+        return []
+    if isinstance(geom, Polygon):
+        return [geom] if geom.area > 1e-9 else []
+    return [g for g in getattr(geom, "geoms", [])
+            if g.geom_type == "Polygon" and not g.is_empty and g.area > 1e-9]
 
-    Band k covers every point at least `edges[k]` high and is SOLID from the
-    bed up to the top of its own elevation range, so the bands nest and lean
-    on each other like a physical contour model - not hollow z-slices. Water
-    is cut clean through every band, exactly like the single-colour plinth.
+
+def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
+    """Relief cut into `cfg.terrain_bands` colour SLICES - a relief map, not a
+    staircase. Each slice is its own object so it gets its own filament
+    (TERRAIN_RAMP / a buyer pick).
+
+    Slice k covers every point at least `edges[k]` high and is a solid draped
+    slab from the bed up to `min(terrain, edges[k+1])`: within its own band the
+    top follows the real relief, above it the top is a flat lid that the next
+    slice up hides. So the finished model's visible surface is the true smooth
+    terrain with the colour changing at elevation contours - not stepped
+    plateaus. Slices nest and lean on each other like a layered contour model;
+    water is cut clean through every one, exactly like the single-colour plinth.
     """
     from shapely.ops import unary_union
     n = max(1, min(int(cfg.terrain_bands), len(TERRAIN_RAMP)))
     x0, x1, y0, y1 = proj.minx, proj.maxx, proj.miny, proj.maxy
-    G = 160
+    # The contour grid. Finer than the old fixed 160 so the colour boundaries
+    # do not look blocky on a big tile (a whole national park is a valid tile).
+    G = int(np.clip(round(cfg.terrain_grid * 0.7), 160, 320))
     ny = max(8, int(G * (y1 - y0) / (x1 - x0)))
     xs = np.linspace(x0, x1, G)
     ys = np.linspace(y0, y1, ny)
@@ -2044,32 +2069,39 @@ def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
     simp = (xs[1] - xs[0]) / 2.0
     zpm = terr_relief_scale[0] * S.z             # metres of relief -> mm
 
-    # a flat tile has nothing to band: one plateau, done
+    def slab(region, cap_mm, label):
+        """Draped solid: flat on the bed, top = min(relief, cap)."""
+        region = region.intersection(bbox_poly)
+        if wu is not None:
+            region = region.difference(wu)
+        polys = _flatten_polys(region)
+        if not polys:
+            return None
+        return build_drape(cfg, proj, terr, S, polys, 0.0, 0.0,
+                           label=label, flat_bottom=0.0, top_cap_mm=cap_mm)
+
+    # a flat tile, or one slice asked for: a single smooth relief surface
     if emax < 1.0 or n == 1:
-        region = bbox_poly.difference(wu) if wu is not None else bbox_poly
-        vf = prism_any(scale_poly(region, proj, S), 0.0,
-                       cfg.base_mm + emax * zpm)
+        vf = slab(bbox_poly, None, "relief surface")
         return [("terrain", vf)] if vf is not None else []
 
     edges = np.linspace(0.0, emax, n + 1)
     out = []
     for k in range(n):
         region = _rle_union(E >= edges[k] - 1e-9, xe, ye).simplify(simp)
-        region = region.intersection(bbox_poly)
-        if wu is not None:
-            region = region.difference(wu)
         if region.is_empty or region.area < 1.0:
             continue
-        top_mm = cfg.base_mm + edges[k + 1] * zpm
-        vf = prism_any(scale_poly(region, proj, S), 0.0, top_mm)
+        cap = None if k == n - 1 else cfg.base_mm + edges[k + 1] * zpm
+        vf = slab(region, cap, f"slicing relief {k + 1}/{n}")
         if vf is None:
             continue
         name = "terrain" if k == 0 else f"terrain_{k + 1}"
         out.append((name, vf))
         if cfg.verbose:
-            print(f"  band {k + 1}/{n}: >= {edges[k] * zpm:.1f} mm, "
-                  f"plateau {top_mm:.1f} mm, {region.area / bbox_poly.area * 100:.0f}%"
-                  f" of the tile", file=sys.stderr)
+            hi = "peak" if cap is None else f"{cap:.1f} mm lid"
+            print(f"  slice {k + 1}/{n}: >= {edges[k] * zpm:.1f} mm, {hi}, "
+                  f"{region.area / bbox_poly.area * 100:.0f}% of the tile",
+                  file=sys.stderr)
     return out
 
 
