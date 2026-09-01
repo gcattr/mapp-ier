@@ -13,7 +13,7 @@ files.
 | `serve.py` | Local HTTP server: serves the console AND runs the exporter behind it. |
 | `map2model-console.html` | The web console. Single file, no build step. |
 | `test_console.js` | Offline harness for the console: stubs the DOM, Leaflet and three.js and invokes every top-level function. `node test_console.js`. |
-| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 41 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
+| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 42 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
 | `verify_bambu.py` | Loads each plate shape through the Bambu Studio CLI, has it re-export, and reads the filaments and per-part extruders back out. Skips cleanly when Bambu Studio is not installed. See **Verifying it**. |
 | `bambu_p1s_0.4.json` | A P1S 0.4 nozzle project config that Bambu Studio itself wrote (v02.05.00.66). `_project_settings()` widens its per-slot lists and writes our filaments in. Version-coupled — see **Known gaps**. |
 | `landmarks.json` | Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it **silently** when it is absent — so if it goes missing the CN Tower renders as straight prisms in preview *and* export, with no warning anywhere. It is tracked in git for exactly that reason. |
@@ -549,6 +549,23 @@ spills to its own `_plate2` file; `serve.py` globs every `<stem>_*.3mf` sibling.
 the draped top ring, nothing else. The top slice passes `cap=None` and follows
 the relief to the peak.
 
+**Two nudges stop the nested slices Z-fighting** (they overlap in space —
+every slice is solid from the bed). Every slice above the base is inset in
+plan by ~0.3 mm of print (`region.buffer(-0.3/S.xy, join_style=2)`, mitre so
+the blocky RLE outline doesn't gain arc points; no re-simplify, which would
+move the contour metres and eat the drop), so its walls sit *inside* the slice
+below instead of coplanar with its surface — this is what fixes the edge
+z-fighting you see at the tile cut, where every slice used to have a wall at
+the same x/y. And each buried lid is dropped below the contour it sits at by
+`min(band·0.45, 0.3 + half_cell·zpm·0.7)` — the RLE boundary lands up to half
+a contour cell downhill of the true contour, so on a slope the slice above
+dips below its own threshold and the drop has to cover that. Verified on a
+40 km Banff tile: every visible surface pair separated by ≥ 0.65 mm, zero
+coincident vertices on the perimeter walls (the only shared verts are buried
+bottom rings at z=0). `polygonOffset` was considered and rejected — the slices
+genuinely interpenetrate, so a depth bias trades a static artifact for a
+camera-angle-dependent one.
+
 `filament_of()` folds `terrain_2..terrain_5` to a ramp default or a buyer
 pick (`_band_index()`); `parse_filaments()` accepts those keys; they are
 deliberately **not** in `DEFAULT_FILAMENTS` (the console mirror-checks it) and
@@ -844,7 +861,7 @@ What it covers is everything *after* geometry: which filament each layer gets,
 what lands in the 3MF, and whether a slicer can read it back.
 
 ```bash
-python test_export.py                   # 41 checks, exit 0 = clean
+python test_export.py                   # 42 checks, exit 0 = clean
 ```
 
 Every check in it is a bug that shipped. The cover one in particular: the cover
@@ -916,7 +933,7 @@ something instead of asserting against itself.
   line in `buildCmd()`; left for a session that can re-run a Toronto tile and
   eyeball the export.
 - **macOS pass, 2026-09-01.** Node 26.8.1 installed via Homebrew, so
-  `node test_console.js` runs here → 58/58; `python3 test_export.py` → 41/41.
+  `node test_console.js` runs here → 58/58; `python3 test_export.py` → 42/42.
   `verify_bambu.py` put all three plate shapes through the real Bambu Studio CLI
   on macOS and passed (re-run after the frame/cover signature change), and its
   `find_bambu()` was widened to cover `Bambu Studio.app` (with a space),

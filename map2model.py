@@ -2044,6 +2044,13 @@ def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
     terrain with the colour changing at elevation contours - not stepped
     plateaus. Slices nest and lean on each other like a layered contour model;
     water is cut clean through every one, exactly like the single-colour plinth.
+
+    Two nudges stop the nested slices from Z-fighting in a viewer (and remove
+    the ambiguity for the slicer): every slice above the base is inset in plan
+    by ~0.3 mm of print so its vertical walls sit *inside* the slice below
+    rather than exactly on its surface, and each buried flat lid is dropped a
+    hair below the contour it sits at so it never lands coplanar with the
+    surface of the slice above.
     """
     from shapely.ops import unary_union
     n = max(1, min(int(cfg.terrain_bands), len(TERRAIN_RAMP)))
@@ -2068,12 +2075,19 @@ def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
     wu = unary_union(water_polys) if water_polys else None
     simp = (xs[1] - xs[0]) / 2.0
     zpm = terr_relief_scale[0] * S.z             # metres of relief -> mm
+    inset_m = 0.3 / S.xy                         # ~0.3 mm of print, in metres
 
-    def slab(region, cap_mm, label):
+    def slab(region, cap_mm, label, inset=False):
         """Draped solid: flat on the bed, top = min(relief, cap)."""
         region = region.intersection(bbox_poly)
         if wu is not None:
             region = region.difference(wu)
+        if inset:
+            # mitre join: a plain round buffer puts 8 arc points on every step
+            # of the blocky RLE outline and quadruples the mesh. No re-simplify
+            # afterwards - that would move the contour tens of metres and eat
+            # the lid drop on a slope. `region` is already simplified.
+            region = region.buffer(-inset_m, join_style=2, mitre_limit=2.0)
         polys = _flatten_polys(region)
         if not polys:
             return None
@@ -2091,8 +2105,19 @@ def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
         region = _rle_union(E >= edges[k] - 1e-9, xe, ye).simplify(simp)
         if region.is_empty or region.area < 1.0:
             continue
-        cap = None if k == n - 1 else cfg.base_mm + edges[k + 1] * zpm
-        vf = slab(region, cap, f"slicing relief {k + 1}/{n}")
+        if k == n - 1:
+            cap = None
+        else:
+            # Drop the buried lid well clear of the slice above. The RLE region
+            # boundary sits up to half a contour cell downhill of the true
+            # contour, so on a slope the slice above dips ~half_cell*slope below
+            # its own threshold - the drop has to cover that or the two still
+            # meet. Bounded so a thin band stays a distinct slice.
+            band_mm = (edges[k + 1] - edges[k]) * zpm
+            half_cell_m = (xs[1] - xs[0]) / 2.0
+            drop = min(band_mm * 0.45, 0.3 + half_cell_m * zpm * 0.7)
+            cap = cfg.base_mm + edges[k + 1] * zpm - drop
+        vf = slab(region, cap, f"slicing relief {k + 1}/{n}", inset=(k > 0))
         if vf is None:
             continue
         name = "terrain" if k == 0 else f"terrain_{k + 1}"

@@ -313,9 +313,51 @@ def _slices_follow_the_relief():
         assert tops[i] > tops[i - 1] - 1e-6, ("lid did not rise", i, tops)
 
 
+class _Ramp:
+    """Synthetic Terrain: elevation rises linearly west -> east, so a band
+    threshold cuts a clean north-south line and the y-extent of every band is
+    the same but for the plan inset applied to the upper slices."""
+    flat = False
+
+    def __init__(self, proj, hi=200.0):
+        self.x0, self.w = proj.minx, (proj.maxx - proj.minx)
+        self.hi = hi
+
+    def elev_xy(self, x, y):
+        import numpy as _np
+        return _np.clip((_np.asarray(x) - self.x0) / self.w, 0.0, 1.0) * self.hi
+
+
+def _slices_do_not_zfight():
+    """The nested slices must not share coincident faces: upper slices are
+    inset in plan (walls sit inside the slice below) and buried lids drop
+    below the contour they sit at (never coplanar with the surface above)."""
+    from shapely.geometry import box
+    proj = _Proj(800.0)
+    M.terr_min[0] = 0.0
+    M.terr_relief_scale[0] = 1.0
+    cfg = M.Config(bbox=(0, 0, 1, 1), mode="terrain", terrain_bands=3)
+    S = M.Scale(xy=200.0 / 1600.0, z=200.0 / 1600.0)
+    bbox_poly = box(proj.minx, proj.miny, proj.maxx, proj.maxy)
+    out = M.build_terrain_bands(cfg, proj, _Ramp(proj, hi=200.0), S, bbox_poly, [])
+    ys = {n: (vf[0][:, 1].max() - vf[0][:, 1].min()) for n, vf in out}
+    # base slice spans the tile; upper slices are pulled in by ~2 x 0.3 mm
+    base = ys["terrain"]
+    for n in ("terrain_2", "terrain_3"):
+        pull = base - ys[n]
+        assert 0.3 < pull < 2.5, f"{n} inset looks wrong: pulled in {pull:.2f} mm"
+    # the buried lid of slice 1 sits below its contour, not on it
+    zpm = M.terr_relief_scale[0] * S.z
+    edges = [0.0, 200.0 / 3, 400.0 / 3, 200.0]
+    lid = out[0][1][0][:, 2].max()
+    contour = cfg.base_mm + edges[1] * zpm
+    assert lid < contour - 1e-3, f"slice 1 lid {lid:.3f} not dropped below contour {contour:.3f}"
+
+
 check("elevation band keys terrain_2..5 are recognised", _band_keys_recognised)
 check("bands default down the ramp and take a pick", _band_filaments_default_down_the_ramp)
 check("terrain slices drape on the relief and nest, not stepped plateaus", _slices_follow_the_relief)
+check("terrain slices are inset and lid-dropped so they do not Z-fight", _slices_do_not_zfight)
 
 
 # ------------------------------------------------------------- route mode
