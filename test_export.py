@@ -245,6 +245,74 @@ check("hex and circle frames and covers are watertight", _hex_and_circle_frames_
 check("the cover keeps its six z-planes and every band has walls", _cover_z_bands)
 
 
+# ------------------------------------------------------------- terrain mode
+print("\nterrain mode:")
+
+
+class _Dome:
+    """Synthetic Terrain: a smooth dome peaking at the bbox centre."""
+    flat = False
+
+    def __init__(self, proj, peak=300.0):
+        self.cx = (proj.minx + proj.maxx) / 2
+        self.cy = (proj.miny + proj.maxy) / 2
+        self.r = min(proj.maxx - proj.minx, proj.maxy - proj.miny) / 2
+        self.peak = peak
+
+    def elev_xy(self, x, y):
+        import numpy as _np
+        d = _np.hypot(_np.asarray(x) - self.cx, _np.asarray(y) - self.cy) / self.r
+        return _np.maximum(self.peak * (1.0 - d * d), 0.0)
+
+
+def _band_keys_recognised():
+    assert M._band_index("terrain_2") == 2
+    assert M._band_index("terrain_5") == 5
+    assert M._band_index("terrain") == 0          # band 1 is just "terrain"
+    assert M._band_index("terrain_6") == 0        # ramp is 5 long
+    assert M._band_index("terrain_x") == 0
+
+
+def _band_filaments_default_down_the_ramp():
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    assert M.filament_of(cfg, "terrain_3")[3] == M.FILAMENTS[M.TERRAIN_RAMP[2]][3]
+    cfg2 = M.Config(bbox=(0, 0, 1, 1), filaments={"terrain_3": "basic_red"})
+    assert M.filament_of(cfg2, "terrain_3")[3] == "#C12E1F", "a band pick was ignored"
+    M.parse_filaments("terrain_4=basic_blue")     # must not raise
+
+
+def _bands_are_nested_solids():
+    from shapely.geometry import box
+    proj = _Proj(800.0)
+    M.terr_min[0] = 0.0
+    M.terr_relief_scale[0] = 1.0
+    cfg = M.Config(bbox=(0, 0, 1, 1), mode="terrain", terrain_bands=4)
+    S = M.Scale(xy=200.0 / 1600.0, z=200.0 / 1600.0)
+    bbox_poly = box(proj.minx, proj.miny, proj.maxx, proj.maxy)
+    out = M.build_terrain_bands(cfg, proj, _Dome(proj), S, bbox_poly, [])
+    names = [n for n, _ in out]
+    assert names[0] == "terrain" and names[1:] == ["terrain_2", "terrain_3", "terrain_4"], names
+    areas, tops = [], []
+    for n, vf in out:
+        V = vf[0]
+        assert _open_edges(vf) == 0, f"{n} band is not closed"
+        assert V[:, 2].min() <= 1e-6, f"{n} is not solid from the bed"
+        # footprint area from the z=0 ring
+        base = V[abs(V[:, 2] - V[:, 2].min()) < 1e-6]
+        areas.append((base[:, 0].max() - base[:, 0].min()) *
+                     (base[:, 1].max() - base[:, 1].min()))
+        tops.append(V[:, 2].max())
+    # higher bands cover less ground and stand taller
+    for i in range(1, len(areas)):
+        assert areas[i] <= areas[i - 1] + 1.0, (i, areas)
+        assert tops[i] > tops[i - 1] - 1e-6, (i, tops)
+
+
+check("elevation band keys terrain_2..5 are recognised", _band_keys_recognised)
+check("bands default down the ramp and take a pick", _band_filaments_default_down_the_ramp)
+check("terrain bands are nested solids, taller and smaller going up", _bands_are_nested_solids)
+
+
 def _picks_are_honoured():
     cfg = M.Config(bbox=(0, 0, 1, 1), filaments={"buildings": "basic_red"})
     assert M.filament_of(cfg, "buildings")[3] == "#C12E1F", "a pick was ignored"

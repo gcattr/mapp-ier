@@ -186,6 +186,21 @@ DEFAULT_FILAMENTS = {
     "cover":     "petg_cover",
 }
 
+# Elevation bands in --mode terrain. terrain_1 is the layer "terrain" (so the
+# single-colour default is unchanged); terrain_2..terrain_5 default down this
+# ramp - lowland green, upland green, tan, grey rock, snow. All stock keys.
+TERRAIN_RAMP = ["matte_grass_green", "matte_dark_green", "matte_desert_tan",
+                "matte_nardo_gray", "basic_jade_white"]
+
+
+def _band_index(layer):
+    """2..5 if `layer` is an elevation band key (terrain_2..terrain_5), else 0."""
+    if layer.startswith("terrain_") and layer[8:].isdigit():
+        n = int(layer[8:])
+        if 2 <= n <= len(TERRAIN_RAMP):
+            return n
+    return 0
+
 # Buyer-pickable layers, in the order the console shows them.
 PICKABLE = ("terrain", "greenery", "roads", "buildings", "water", "frame")
 
@@ -201,6 +216,11 @@ def filament_of(cfg, layer):
     """
     if layer.startswith("cover_"):
         layer = "cover"
+    bi = _band_index(layer)
+    if bi:
+        # terrain_2..terrain_5: a pick if the buyer made one, else the ramp
+        key = (cfg.filaments or {}).get(layer) or TERRAIN_RAMP[bi - 1]
+        return FILAMENTS.get(key) or FILAMENTS[TERRAIN_RAMP[bi - 1]]
     key = (cfg.filaments or {}).get(layer) or DEFAULT_FILAMENTS.get(layer)
     return FILAMENTS.get(key) or FILAMENTS[DEFAULT_FILAMENTS.get(layer, "basic_gray")]
 
@@ -220,9 +240,10 @@ def parse_filaments(spec):
         if "=" not in chunk:
             raise ValueError(f"--filaments: expected layer=filament, got {chunk!r}")
         layer, key = (x.strip() for x in chunk.split("=", 1))
-        if layer not in DEFAULT_FILAMENTS:
+        if layer not in DEFAULT_FILAMENTS and not _band_index(layer):
             raise ValueError(f"--filaments: unknown layer {layer!r}; "
-                             f"pick from {', '.join(sorted(DEFAULT_FILAMENTS))}")
+                             f"pick from {', '.join(sorted(DEFAULT_FILAMENTS))}"
+                             f" (or terrain_2..terrain_5 for elevation bands)")
         if key not in FILAMENTS:
             raise ValueError(f"--filaments: unknown filament {key!r}; "
                              f"pick from {', '.join(sorted(FILAMENTS))}")
@@ -235,6 +256,14 @@ class Config:
     # geography
     bbox: tuple = (-79.400, 43.636, -79.370, 43.655)   # minlon, minlat, maxlon, maxlat
 
+    # what the tile is
+    mode: str = "city"           # city | terrain. terrain drops buildings /
+                                 # roads / greenery and cuts the relief into
+                                 # elevation colour bands.
+    terrain_bands: int = 1       # 1 = smooth single-colour relief; 2..5 = that
+                                 # many stepped elevation bands, each its own
+                                 # filament (see TERRAIN_RAMP). Band 5 spills
+                                 # to its own plate.
     # print size
     size_mm: float = 150.0        # longest horizontal dimension of the finished print
     tile_shape: str = "square"    # square | hex | circle. The vector layers clip
@@ -844,6 +873,13 @@ def fetch_all_overture(cfg):
                         ["id", "building_id", "height", "min_height",
                          "num_floors", "roof_shape", "roof_height",
                          "roof_direction", "roof_orientation"], ""))
+
+    # Do not scan S3 for layers this build will throw away. --mode terrain and
+    # --no-buildings etc. each drop ~2 min of Overture fetch.
+    want = {"buildings": cfg.want_buildings, "parts": cfg.want_buildings,
+            "roads": cfg.want_roads, "water": cfg.want_water,
+            "land_cover": cfg.want_greenery, "land_use": cfg.want_greenery}
+    jobs = [j for j in jobs if want.get(j[0], True)]
 
     out = {}
 
@@ -1798,7 +1834,7 @@ def build_drape(cfg, proj, terr, S, polys, thickness_mm, embed_mm,
             if V2 is None:
                 continue
             gz = terr.elev_xy(V2[:, 0], V2[:, 1])
-            gz = (gz - terr_min[0]) * S.z + cfg.base_mm
+            gz = (gz - terr_min[0]) * terr_relief_scale[0] * S.z + cfg.base_mm
             px = (V2[:, 0] - (proj.minx + proj.maxx) / 2) * S.xy
             py = (V2[:, 1] - (proj.miny + proj.maxy) / 2) * S.xy
             n = len(V2)
@@ -1836,6 +1872,89 @@ def prism_any(poly, z0, z1):
         if isinstance(g, Polygon) and not g.is_empty and g.area > 1e-9:
             acc.add(prism(g, z0, z1, None))
     return acc.result()
+
+
+def _rle_union(mask, xe, ye):
+    """Union of the grid cells where `mask` is true, one run-length box per
+    horizontal run so a 160-wide row is a handful of boxes, not 160. `xe`/`ye`
+    are the (nx+1)/(ny+1) cell edges."""
+    from shapely.geometry import box as _box, Polygon
+    from shapely.ops import unary_union
+    ny, nx = mask.shape
+    boxes = []
+    for j in range(ny):
+        row = mask[j]
+        i = 0
+        while i < nx:
+            if not row[i]:
+                i += 1
+                continue
+            k = i + 1
+            while k < nx and row[k]:
+                k += 1
+            boxes.append(_box(xe[i], ye[j], xe[k], ye[j + 1]))
+            i = k
+    return unary_union(boxes) if boxes else Polygon()
+
+
+def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
+    """Relief cut into `cfg.terrain_bands` stepped plateaus, each its own
+    object so it gets its own filament (TERRAIN_RAMP / a buyer pick).
+
+    Band k covers every point at least `edges[k]` high and is SOLID from the
+    bed up to the top of its own elevation range, so the bands nest and lean
+    on each other like a physical contour model - not hollow z-slices. Water
+    is cut clean through every band, exactly like the single-colour plinth.
+    """
+    from shapely.ops import unary_union
+    n = max(1, min(int(cfg.terrain_bands), len(TERRAIN_RAMP)))
+    x0, x1, y0, y1 = proj.minx, proj.maxx, proj.miny, proj.maxy
+    G = 160
+    ny = max(8, int(G * (y1 - y0) / (x1 - x0)))
+    xs = np.linspace(x0, x1, G)
+    ys = np.linspace(y0, y1, ny)
+    X, Y = np.meshgrid(xs, ys)
+    E = np.maximum(terr.elev_xy(X, Y).astype(float) - terr_min[0], 0.0)
+    emax = float(E.max())
+
+    xe = np.empty(G + 1)
+    xe[1:-1] = (xs[:-1] + xs[1:]) / 2
+    xe[0], xe[-1] = xs[0] - (xs[1] - xs[0]) / 2, xs[-1] + (xs[-1] - xs[-2]) / 2
+    ye = np.empty(ny + 1)
+    ye[1:-1] = (ys[:-1] + ys[1:]) / 2
+    ye[0], ye[-1] = ys[0] - (ys[1] - ys[0]) / 2, ys[-1] + (ys[-1] - ys[-2]) / 2
+
+    wu = unary_union(water_polys) if water_polys else None
+    simp = (xs[1] - xs[0]) / 2.0
+    zpm = terr_relief_scale[0] * S.z             # metres of relief -> mm
+
+    # a flat tile has nothing to band: one plateau, done
+    if emax < 1.0 or n == 1:
+        region = bbox_poly.difference(wu) if wu is not None else bbox_poly
+        vf = prism_any(scale_poly(region, proj, S), 0.0,
+                       cfg.base_mm + emax * zpm)
+        return [("terrain", vf)] if vf is not None else []
+
+    edges = np.linspace(0.0, emax, n + 1)
+    out = []
+    for k in range(n):
+        region = _rle_union(E >= edges[k] - 1e-9, xe, ye).simplify(simp)
+        region = region.intersection(bbox_poly)
+        if wu is not None:
+            region = region.difference(wu)
+        if region.is_empty or region.area < 1.0:
+            continue
+        top_mm = cfg.base_mm + edges[k + 1] * zpm
+        vf = prism_any(scale_poly(region, proj, S), 0.0, top_mm)
+        if vf is None:
+            continue
+        name = "terrain" if k == 0 else f"terrain_{k + 1}"
+        out.append((name, vf))
+        if cfg.verbose:
+            print(f"  band {k + 1}/{n}: >= {edges[k] * zpm:.1f} mm, "
+                  f"plateau {top_mm:.1f} mm, {region.area / bbox_poly.area * 100:.0f}%"
+                  f" of the tile", file=sys.stderr)
+    return out
 
 
 def _shift_vf(vf, dx):
@@ -2731,6 +2850,10 @@ class Scale:
 
 
 terr_min = [0.0]   # module-level so the drape/emit helpers can reach it
+# In --mode terrain with "tallest point = N mm" set, this scales metres of
+# real relief so the highest sample lands at terrain_relief_mm. 1.0 (true
+# scale) everywhere else, so the city path is untouched.
+terr_relief_scale = [1.0]
 
 
 MODELS_DIR = "3Dmodels"
@@ -2759,10 +2882,16 @@ def run(cfg, out_path):
     from shapely.geometry import box
 
     out_path = model_out_path(out_path)
-    print(f"map2model {__version__}  source={cfg.source}  lod={cfg.lod}",
+    print(f"map2model {__version__}  source={cfg.source}  lod={cfg.lod}"
+          + (f"  mode={cfg.mode}" if cfg.mode != "city" else ""),
           file=sys.stderr)
     print(f"  writing to {os.path.dirname(os.path.abspath(out_path))}",
           file=sys.stderr)
+    if cfg.mode == "terrain":
+        # A relief map is the land and the water. The city layers only get in
+        # the way of reading the contours.
+        cfg.want_buildings = cfg.want_roads = cfg.want_greenery = False
+    terr_relief_scale[0] = 1.0
     proj = Projector(cfg.bbox)
     span_x = proj.maxx - proj.minx
     span_y = proj.maxy - proj.miny
@@ -2781,12 +2910,13 @@ def run(cfg, out_path):
             full = box(proj.minx, proj.miny, proj.maxx, proj.maxy).area
             log(cfg, f"[shape] {cfg.tile_shape} tile, "
                      f"{bbox_poly.area / full * 100:.0f}% of the bbox")
-            if not cfg.water_in_frame:
+            if not cfg.water_in_frame and cfg.mode == "city":
                 # The land plinth only follows a non-rectangular outline on the
                 # water-in-frame path (build_drape); the plain build_terrain
                 # grid stays rectangular, so its corners would foul the shaped
                 # frame and the model would not drop in. The console and the
-                # copied command always pass --water-in-frame.
+                # copied command always pass --water-in-frame. (Terrain mode
+                # builds bands, which clip to bbox_poly, so it is fine.)
                 print(f"[warn] --tile-shape {cfg.tile_shape} without "
                       f"--water-in-frame: the terrain plinth stays rectangular "
                       f"and will not fit the {cfg.tile_shape} frame. Add "
@@ -2794,7 +2924,17 @@ def run(cfg, out_path):
         gx = np.linspace(proj.minx, proj.maxx, 60)
         gy = np.linspace(proj.miny, proj.maxy, 60)
         GX, GY = np.meshgrid(gx, gy)
-        terr_min[0] = float(np.min(terr.elev_xy(GX, GY)))
+        _samp = terr.elev_xy(GX, GY)
+        terr_min[0] = float(np.min(_samp))
+        # "tallest point = N mm": scale real relief so the highest sample lands
+        # at terrain_relief_mm. Terrain mode only; the city path stays 1.0.
+        if cfg.mode == "terrain" and cfg.terrain_relief_mm > 0:
+            span_m = float(np.max(_samp)) - terr_min[0]
+            if span_m > 1e-6:
+                terr_relief_scale[0] = (cfg.terrain_relief_mm / S.z) / span_m
+                log(cfg, f"[relief] tallest point {span_m:.0f} m -> "
+                         f"{cfg.terrain_relief_mm:.0f} mm "
+                         f"(x{terr_relief_scale[0] * S.z:.2f} of true)")
 
     del FETCH_ERRORS[:]
     _EMPTY_RETRIED[0] = False
@@ -2958,7 +3098,12 @@ def run(cfg, out_path):
         road_p = subtract(road_p)
 
     raw = []
-    if cfg.water_in_frame:
+    if cfg.mode == "terrain" and cfg.terrain_bands > 1:
+        # Relief cut into stepped elevation bands, each its own filament. The
+        # bands clip to bbox_poly themselves, so this works for hex/circle too.
+        with Stage("mesh terrain bands", cfg.verbose):
+            raw.extend(build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_p))
+    elif cfg.water_in_frame:
         # The land plinth is the tile MINUS the water, cut clean through, so
         # the water surface printed into the frame shows from underneath.
         with Stage("mesh terrain (water cut out)", cfg.verbose):
@@ -3028,19 +3173,24 @@ def run(cfg, out_path):
 
     with Stage("write 3mf", cfg.verbose):
         if cfg.split:
-            # One AMS = 4 filaments per plate. Terrain + roads + greenery +
-            # buildings is exactly four, so water and frame each get their own
-            # file (and their own single-colour plate).
+            # One AMS = 4 filaments per plate. In the city that is exactly
+            # terrain + roads + greenery + buildings; in terrain mode it is
+            # elevation bands 1-4. A 5th band spills to its own plate. Water
+            # and frame share a plate; the cover is on its own.
             import os as _os
             stem, ext = _os.path.splitext(out_path)
             ext = ext or ".3mf"
+            model_order = ["terrain", "terrain_2", "terrain_3", "terrain_4",
+                           "terrain_5", "roads", "greenery", "buildings"]
+            have = {n for n, vf in layers if vf is not None}
+            present = [n for n in model_order if n in have]
+            main, spill = present[:4], present[4:]
             if cfg.water_in_frame:
-                groups = [("", ["terrain", "roads", "greenery", "buildings"]),
-                          ("_frame", ["frame", "water"])]
+                groups = [("", main), ("_frame", ["frame", "water"])]
             else:
-                groups = [("", ["terrain", "roads", "greenery", "buildings"]),
-                          ("_water", ["water"]),
-                          ("_frame", ["frame"])]
+                groups = [("", main), ("_water", ["water"]), ("_frame", ["frame"])]
+            for i, nm in enumerate(spill, start=2):
+                groups.append((f"_plate{i}", [nm]))
             groups.append(("_cover", ["cover_left", "cover_right"]))
             d = _os.path.dirname(_os.path.abspath(out_path))
             if d:
@@ -3160,6 +3310,8 @@ def _list_filaments():
         print(f"  {key:<{w}}  {hexc}  {nm:<24} {typ:<4} {fid}"
               + (f"   default for {', '.join(dflt)}" if dflt else ""))
     print("\nlayers:", ", ".join(sorted(DEFAULT_FILAMENTS)))
+    print("        plus terrain_2..terrain_5 for elevation bands (--mode terrain);"
+          f"\n        those default down the ramp {' -> '.join(TERRAIN_RAMP)}")
 
 
 def main():
@@ -3177,6 +3329,17 @@ def main():
                     help="half-width in metres when using --center")
     ap.add_argument("-o", "--out", default="city.3mf")
     ap.add_argument("--size", type=float, default=150.0, help="print size in mm")
+    ap.add_argument("--mode", default="city", choices=["city", "terrain"],
+                    help="city (default) = buildings, roads, greenery. terrain "
+                         "= relief and water only, optionally cut into "
+                         "elevation colour bands (--terrain-bands).")
+    ap.add_argument("--terrain-bands", type=int, default=1,
+                    help="--mode terrain: cut the relief into this many stepped "
+                         "elevation bands, each its own filament (1 = smooth "
+                         "single colour; max 5, the 5th on its own plate)")
+    ap.add_argument("--terrain-relief-mm", type=float, default=0.0,
+                    help="--mode terrain: scale the relief so the tallest point "
+                         "is this many mm (0 = true scale)")
     ap.add_argument("--tile-shape", default="square",
                     choices=["square", "hex", "circle"],
                     help="outline the tile is cut to (default square). hex is "
@@ -3354,6 +3517,8 @@ def main():
         bbox = (lon - dlon, lat - dlat, lon + dlon, lat + dlat)
 
     cfg = Config(bbox=bbox, size_mm=a.size, tile_shape=a.tile_shape,
+                 mode=a.mode, terrain_bands=a.terrain_bands,
+                 terrain_relief_mm=a.terrain_relief_mm,
                  z_exaggeration=a.zexag,
                  terrain=not a.no_terrain, use_building_parts=not a.no_parts,
                  roof_shapes=not a.no_roofs,

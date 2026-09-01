@@ -396,6 +396,15 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
   <div class="panel">
 
     <section>
+      <h2>What to make</h2>
+      <div class="seg" id="modes">
+        <button data-mode="city" class="on">City<br>buildings</button>
+        <button data-mode="terrain">Terrain<br>elevation</button>
+        <button data-mode="route" disabled title="Coming soon">Route<br>soon</button>
+      </div>
+    </section>
+
+    <section>
       <h2>Tile</h2>
       <div class="hint" id="areaHint">Drag a tile on the map. You draw a square;
         the shape below is cut from inside it and the frame follows it.</div>
@@ -426,11 +435,17 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
       <div class="row"><label class="t" for="zex">Land relief</label>
         <input type="range" id="zex" min="1" max="4" step="0.1" value="1">
         <span class="val" id="vZex">1.0×</span></div>
-      <div class="row"><label class="t" for="bscale">Building stretch</label>
+      <div class="row" id="rowBscale"><label class="t" for="bscale">Building stretch</label>
         <input type="range" id="bscale" min="0.5" max="3" step="0.1" value="1">
         <span class="val" id="vBscale">1.0×</span></div>
-      <div class="row"><label class="t" for="terrain">Include terrain relief</label>
+      <div class="row" id="rowTerrainChk"><label class="t" for="terrain">Include terrain relief</label>
         <input type="checkbox" id="terrain" checked></div>
+      <div class="row hidden" id="rowBands"><label class="t" for="bands">Colour bands</label>
+        <input type="range" id="bands" min="1" max="5" step="1" value="4">
+        <span class="val" id="vBands">4</span></div>
+      <div class="row hidden" id="rowRelief"><label class="t" for="relief">Tallest point</label>
+        <input type="range" id="relief" min="6" max="40" step="1" value="22">
+        <span class="val" id="vRelief">22 mm</span></div>
     </section>
 
     <section>
@@ -531,16 +546,23 @@ const FILMS = [
 const on  = {terrain:true, water:true, greenery:true, roads:true,
              buildings:true, frame:true};
 
-/* The shop defaults. Mirrors DEFAULT_FILAMENTS in map2model.py. */
+/* The shop defaults. Mirrors DEFAULT_FILAMENTS in map2model.py. Band keys are
+   deliberately NOT in here -- test_console.js pins this dict against Python's,
+   and Python keeps elevation bands out of it too (TERRAIN_RAMP handles them). */
 const DEFAULT_FILAMENTS = {
   terrain:'matte_grass_green', greenery:'basic_jade_white',
   roads:'basic_black',         buildings:'basic_gray',
   water:'matte_marine_blue',   frame:'basic_black',
 };
+/* Elevation bands in Terrain mode. Mirrors TERRAIN_RAMP in map2model.py.
+   Index 0 is the layer "terrain"; terrain_2..terrain_5 default down the rest. */
+const TERRAIN_RAMP = ['matte_grass_green','matte_dark_green','matte_desert_tan',
+                      'matte_nardo_gray','basic_jade_white'];
 /* layer -> filament key. This is the buyer's order; `col` is only its
    rendering. Never set col directly -- set pick and let colFromPick() derive,
    so the swatch, the preview and the copied command cannot disagree. */
 const pick = Object.assign({}, DEFAULT_FILAMENTS);
+for(let n=2;n<=TERRAIN_RAMP.length;n++){ pick['terrain_'+n]=TERRAIN_RAMP[n-1]; on['terrain_'+n]=true; }
 const col  = {};
 function colFromPick(){
   for(const k in pick) col[k] = (FILAMENTS[pick[k]]||{hex:'#888888'}).hex;
@@ -589,7 +611,7 @@ function drawFilms(){
     if(!seen.has(pick[k])) seen.set(pick[k], seen.size + 1);
     return seen.get(pick[k]);
   };
-  $('films').innerHTML = FILMS.map(f=>{
+  $('films').innerHTML = activeFilms().map(f=>{
     const onPlate = on[f.k] && !(f.k==='water'&&wif) && f.k!=='frame';
     const slot = onPlate ? slotOf(f.k) : 0;
     const tag = !on[f.k] ? 'off'
@@ -869,6 +891,46 @@ $('sizes').querySelectorAll('button').forEach(b=>
     $('sizes').querySelectorAll('button').forEach(x=>x.classList.remove('on'));
     b.classList.add('on'); sync(); repaint();
   }));
+
+/* ---------------- what to make: city vs terrain ---------------- */
+let mode = 'city';
+const bandCount  = () => +($('bands').value || 1);
+const reliefMM   = () => +($('relief').value || 0);
+/* The filament rows for the current mode. City is the full list; Terrain is
+   the relief + water + frame, plus one row per elevation band above the
+   first. Bands are always on -- the band count is the control. */
+function activeFilms(){
+  if(mode !== 'terrain') return FILMS;
+  const out = [{k:'terrain', nm:'Elevation 1', note:'lowest', locked:true}];
+  for(let n=2;n<=bandCount();n++)
+    out.push({k:'terrain_'+n, nm:'Elevation '+n, note:'band '+n, locked:true});
+  out.push({k:'water', nm:'Water', note:'--no-water'});
+  out.push({k:'frame', nm:'Frame', note:'border + water plate', locked:true});
+  return out;
+}
+function setMode(m){
+  mode = (m === 'terrain') ? 'terrain' : 'city';
+  $('modes').querySelectorAll('button').forEach(x =>
+    x.classList.toggle('on', x.dataset.mode === mode));
+  const terr = mode === 'terrain';
+  ['rowBands','rowRelief'].forEach(id => $(id).classList.toggle('hidden', !terr));
+  ['rowBscale','rowTerrainChk'].forEach(id => $(id).classList.toggle('hidden', terr));
+  drawFilms();
+}
+$('modes').querySelectorAll('button').forEach(b=>
+  b.addEventListener('click', ()=>{
+    if(b.disabled) return;
+    setMode(b.dataset.mode);
+    if(cache) previewStale('The mode changed, so the preview is out of date.');
+    sync(); repaint();
+  }));
+$('bands').addEventListener('input', ()=>{ $('vBands').textContent = bandCount();
+  drawFilms(); });
+$('bands').addEventListener('change', ()=>{ sync(); repaint();
+  if(cache) previewStale('The band count changed, so the preview is out of date.'); });
+$('relief').addEventListener('input', ()=>{ $('vRelief').textContent = reliefMM()+' mm'; });
+$('relief').addEventListener('change', ()=>{ sync(); repaint();
+  if(cache) previewStale('The relief scale changed, so the preview is out of date.'); });
 $('shapes').querySelectorAll('button').forEach(b=>
   b.addEventListener('click', ()=>{
     setShape(b.dataset.shape);
@@ -906,9 +968,14 @@ function buildCmd(){
   // otherwise push a skyline past the print size the buyer paid for, and the
   // cube cover would grow with it. 100/150/200 mm print, 100/150/200 mm tall.
   a.push(`--max-building-mm ${sizeMM}`);
-  if(v.zex!==1)    a.push(`--zexag ${v.zex.toFixed(1)}`);
-  if(v.bscale!==1) a.push(`--building-scale ${v.bscale.toFixed(1)}`);
-  if(!$('terrain').checked) a.push('--no-terrain');
+  if(mode==='terrain'){
+    a.push('--mode terrain', `--terrain-bands ${bandCount()}`);
+    if(reliefMM()>0) a.push(`--terrain-relief-mm ${reliefMM()}`);
+  } else {
+    if(v.bscale!==1) a.push(`--building-scale ${v.bscale.toFixed(1)}`);
+    if(!$('terrain').checked) a.push('--no-terrain');
+  }
+  if(v.zex!==1 && mode!=='terrain') a.push(`--zexag ${v.zex.toFixed(1)}`);
   ['water','greenery','roads','buildings'].forEach(k=>{ if(!on[k]) a.push('--no-'+k); });
   if(DETAIL.source!=='overture') a.push('--source osm');
   if(DETAIL.lod!=='2')           a.push('--lod 1');
@@ -923,7 +990,7 @@ function buildCmd(){
   // default. This string is pasted into an Etsy order and run days later by a
   // human: it has to say what the buyer actually chose, not what the exporter
   // would have guessed on the day it runs.
-  const fl = FILMS.filter(f=>on[f.k]).map(f=>`${f.k}=${pick[f.k]}`).join(',');
+  const fl = activeFilms().filter(f=>on[f.k]).map(f=>`${f.k}=${pick[f.k]}`).join(',');
   if(fl) a.push(`--filaments ${fl}`);
   a.push(`-o ${$('out').value.trim()||'placeholder.3mf'}`);
   return `python map2model.py ${a.join(' ')}`;
@@ -1411,7 +1478,7 @@ function buildScene(els){
   $('prevLegend').innerHTML = mono
     ? `<span><i style="background:${MONO_COL}"></i>Model</span>`
       + `<span><i style="background:${shown('frame')}"></i>Frame</span>`
-    : FILMS.filter(f=>on[f.k]).map(f=>
+    : activeFilms().filter(f=>on[f.k]).map(f=>
         `<span><i style="background:${col[f.k]}"></i>${f.nm}</span>`).join('');
   $('prevHud').classList.remove('hidden'); $('prevLegend').classList.remove('hidden');
   return nb;
@@ -1436,19 +1503,31 @@ async function pingServer(){
 
 function exactParams(){
   const b = bboxOf(), v = S();
-  return new URLSearchParams({
+  const terr = mode === 'terrain';
+  const p = {
     bbox: [b.w,b.s,b.e,b.n].map(n=>n.toFixed(6)).join(','),
     size: sizeMM, max_building_mm: sizeMM, shape: shape,
+    mode: mode,
     zexag: v.zex, building_scale: v.bscale,
     terrain: $('terrain').checked ? 1 : 0,
-    water: on.water?1:0, greenery: on.greenery?1:0,
-    roads: on.roads?1:0, buildings: on.buildings?1:0,
+    water: on.water?1:0,
+    greenery: terr?0:(on.greenery?1:0),
+    roads: terr?0:(on.roads?1:0),
+    buildings: terr?0:(on.buildings?1:0),
     roofs: DETAIL.roofs, ridge: v.ridge,
     lod: DETAIL.lod, source: DETAIL.source,
     frame_width: v.fw, frame_depth: v.fd,
     frame_clearance: v.fc, frame_floor: v.ff,
     landmarks: 'landmarks.json'
-  }).toString();
+  };
+  if(terr){
+    p.terrain_bands = bandCount();
+    if(reliefMM() > 0) p.terrain_relief_mm = reliefMM();
+    // spell out the band filament picks so the preview matches the order
+    p.filaments = activeFilms().filter(f=>on[f.k])
+      .map(f=>`${f.k}=${pick[f.k]}`).join(',');
+  }
+  return new URLSearchParams(p).toString();
 }
 
 function buildExactScene(layers){
@@ -1577,7 +1656,7 @@ function buildExactScene(layers){
   $('prevLegend').innerHTML = mono
     ? `<span><i style="background:${MONO_COL}"></i>Model</span>`
       + `<span><i style="background:${shown('frame')}"></i>Frame</span>`
-    : FILMS.filter(f=>on[f.k]).map(f=>
+    : activeFilms().filter(f=>on[f.k]).map(f=>
         `<span><i style="background:${col[f.k]}"></i>${f.nm}</span>`).join('');
   $('prevHud').classList.remove('hidden');
   $('prevLegend').classList.remove('hidden');
@@ -2392,6 +2471,9 @@ document.querySelectorAll('input,select').forEach(el=>{
 });
 
 DISCLAIMER_HTML = $('prevDisclaimer').innerHTML;
+// Deep-link the mode: the terrain listing on Etsy points at ?mode=terrain.
+try{ const m = new URLSearchParams(location.search).get('mode');
+     if(m === 'terrain') setMode('terrain'); }catch(e){}
 drawFilms();
 pingServer();
 placeRect(true);

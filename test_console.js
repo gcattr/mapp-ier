@@ -706,6 +706,43 @@ check('the shape outline has the right corner count', () => {
   G.setShape('square');
 });
 
+/* ---------------- terrain mode ---------------- */
+console.log('\nterrain mode: elevation instead of buildings:');
+check('the band ramp mirrors the exporter', () => {
+  const js = G.TERRAIN_RAMP;
+  ok(Array.isArray(js) && js.length === 5, 'TERRAIN_RAMP should be 5 keys: ' + js);
+  const py = fs.readFileSync(path.join(__dirname, 'map2model.py'), 'utf8');
+  const m = py.match(/TERRAIN_RAMP\s*=\s*\[([^\]]+)\]/);
+  ok(m, 'no TERRAIN_RAMP in map2model.py');
+  const pyKeys = [...m[1].matchAll(/"([a-z0-9_]+)"/g)].map(x => x[1]);
+  eq(js.join(','), pyKeys.join(','), 'the console and exporter ramps disagree');
+  // every ramp colour must be a stocked filament
+  for (const k of js) ok(G.FILAMENTS[k], 'ramp colour not stocked: ' + k);
+  // and bands must NOT pollute DEFAULT_FILAMENTS (the mirror check pins that)
+  ok(!('terrain_2' in G.DEFAULT_FILAMENTS), 'a band key leaked into DEFAULT_FILAMENTS');
+});
+check('setMode terrain rewrites the command and the preview params', () => {
+  eq(typeof G.setMode, 'function', 'setMode');
+
+  G.setMode('city');
+  ok(!/--mode|--terrain-bands/.test(G.buildCmd()), 'city must not spell out a mode');
+
+  document.getElementById('bands').value = 4;    // the stub has no HTML default
+  G.setMode('terrain');
+  const cmd = G.buildCmd();
+  ok(/--mode terrain(\s|$)/.test(cmd), '--mode terrain missing: ' + cmd);
+  ok(/--terrain-bands 4(\s|$)/.test(cmd), '--terrain-bands missing: ' + cmd);
+  ok(/terrain_2=/.test(cmd), 'band 2 filament not spelled out: ' + cmd);
+  ok(!/buildings=/.test(cmd), 'terrain mode still ships a buildings filament: ' + cmd);
+  const ep = G.exactParams();
+  ok(/(^|&)mode=terrain(&|$)/.test(ep), 'exactParams lost mode=terrain');
+  ok(/(^|&)terrain_bands=\d(&|$)/.test(ep), 'exactParams lost terrain_bands');
+  ok(/(^|&)buildings=0(&|$)/.test(ep), 'terrain preview still asks for buildings');
+
+  G.setMode('city');                             // leave the fixture clean
+  ok(!/--mode/.test(G.buildCmd()), 'setMode(city) did not undo terrain');
+});
+
 /* ---------------- camera ---------------- */
 console.log('\nthe preview camera:');
 function pointer(el, type, id, x, y, extra) {

@@ -11,6 +11,7 @@ geometry that ends up in the 3MF, because it IS the 3MF.
 
 Everything is stdlib apart from what map2model.py already needs.
 """
+import glob
 import http.server
 import io
 import json
@@ -86,6 +87,9 @@ def cfg_from(q):
         size_mm=num("size", 200.0),
         max_building_mm=num("max_building_mm", 0.0),
         tile_shape=q.get("shape", ["square"])[0],
+        mode=q.get("mode", ["city"])[0],
+        terrain_bands=int(num("terrain_bands", 1)),
+        terrain_relief_mm=num("terrain_relief_mm", 0.0),
         z_exaggeration=num("zexag", 1.0),
         building_scale=num("building_scale", 1.0),
         terrain=flag("terrain", True),
@@ -180,18 +184,13 @@ def run_job(job, cfg):
     try:
         with redirect_stdout(sink), redirect_stderr(sink):
             map2model.run(cfg, tmp)
-        # --split writes siblings; the land plate keeps the base name.
-        # _cover MUST be in this list. The console measures the cover against
-        # the 250 mm build volume, and the cover is the tall part - it overflows
-        # long before the model does. While this only looked for _frame and
-        # _water (which water_in_frame means is never written), no cover_ layer
-        # ever reached the browser, so that check silently passed on every tile.
-        produced = [tmp]
+        # --split writes siblings; the land plate keeps the base name. Glob
+        # every "<stem>_*.3mf" so _cover, _frame, _water AND terrain-mode band
+        # plates (_plate2, ...) all reach the browser. _cover in particular
+        # MUST get through: the console measures it against the 250 mm build
+        # volume and it is the tall part - it overflows long before the model.
         stem, ext = os.path.splitext(tmp)
-        for suffix in ("_frame", "_water", "_cover"):
-            p = stem + suffix + ext
-            if os.path.exists(p):
-                produced.append(p)
+        produced = [tmp] + sorted(glob.glob(stem + "_*" + ext))
         layers = []
         for p in produced:
             layers += mesh_from_3mf(p)

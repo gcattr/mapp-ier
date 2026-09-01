@@ -13,7 +13,7 @@ files.
 | `serve.py` | Local HTTP server: serves the console AND runs the exporter behind it. |
 | `map2model-console.html` | The web console. Single file, no build step. |
 | `test_console.js` | Offline harness for the console: stubs the DOM, Leaflet and three.js and invokes every top-level function. `node test_console.js`. |
-| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 32 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
+| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 36 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
 | `verify_bambu.py` | Loads each plate shape through the Bambu Studio CLI, has it re-export, and reads the filaments and per-part extruders back out. Skips cleanly when Bambu Studio is not installed. See **Verifying it**. |
 | `bambu_p1s_0.4.json` | A P1S 0.4 nozzle project config that Bambu Studio itself wrote (v02.05.00.66). `_project_settings()` widens its per-slot lists and writes our filaments in. Version-coupled — see **Known gaps**. |
 | `landmarks.json` | Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it **silently** when it is absent — so if it goes missing the CN Tower renders as straight prisms in preview *and* export, with no warning anywhere. It is tracked in git for exactly that reason. |
@@ -506,6 +506,46 @@ in `to_green_polys()` is now the hex/circle area, so the `green_blanket_scale`
 `--tile-shape hex` without `--water-in-frame` prints a `[warn]` — the terrain
 grid would foul the shaped frame.
 
+## Terrain mode
+
+`--mode city | terrain` (`Config.mode`, default `city`). The console shows it
+as a **What to make** control — City / Terrain / Route (Route is a disabled
+stub for phase 4). `?mode=terrain` in the URL preselects it, which is how the
+terrain Etsy listing will deep-link. `serve.py`'s `cfg_from` reads `mode`,
+`terrain_bands`, `terrain_relief_mm`.
+
+`--mode terrain` drops buildings, roads and greenery (`run()` forces the
+`want_*` flags off) — a relief map is the land and the water. It **keeps** the
+shaped frame and cube cover; the buyer asked for a picture-frame border around
+the relief, so the plate strategy is the city's (4-colour land plate +
+frame/water plate + cover), not a bare model.
+
+**Elevation bands.** `--terrain-bands N` (1–5, default 1 = smooth single
+colour). `build_terrain_bands()` is a *third* terrain builder — `build_drape`
+never sees a grid and `build_terrain` is rectangular-only. It samples a 160-wide
+elevation grid, and for each of N thresholds run-length-encodes the cells at or
+above it into row boxes, `unary_union`s them (a few hundred boxes, not tens of
+thousands), `.simplify`s, clips to `bbox_poly`, cuts the water out, and
+`prism`s the region **solid from the bed** up to the top of its own elevation
+range. The bands nest and lean on each other like a physical contour model —
+they are *not* hollow z-slices. Band 1 is the object `terrain`; `terrain_2..5`
+default down `TERRAIN_RAMP` (lowland green → upland green → tan → grey rock →
+snow, all stock keys). A 5th band spills to its own `_plate2` file;
+`serve.py` now globs every `<stem>_*.3mf` sibling instead of a fixed suffix
+list so it reaches the preview.
+
+`filament_of()` folds `terrain_2..terrain_5` to a ramp default or a buyer
+pick (`_band_index()`); `parse_filaments()` accepts those keys; they are
+deliberately **not** in `DEFAULT_FILAMENTS` (the console mirror-checks it) and
+`--list-filaments` mentions them in a footnote.
+
+**Relief control.** The console's terrain slider is "Tallest point = N mm"
+(`--terrain-relief-mm`), not a multiplier — a buyer has no idea whether their
+tile rises 5 m or 900 m. It scales real relief so the highest sample lands at
+N mm, via the module global `terr_relief_scale` (set in `run()` next to
+`terr_min`; `build_drape` and `build_terrain_bands` both read it, and it stays
+`1.0` for the city).
+
 ## The cover
 
 Two half-shells, each closed on three sides, with a retaining groove along all
@@ -732,7 +772,7 @@ What it covers is everything *after* geometry: which filament each layer gets,
 what lands in the 3MF, and whether a slicer can read it back.
 
 ```bash
-python test_export.py                   # 32 checks, exit 0 = clean
+python test_export.py                   # 36 checks, exit 0 = clean
 ```
 
 Every check in it is a bug that shipped. The cover one in particular: the cover
@@ -762,7 +802,7 @@ a call to a function that no longer exists passes cleanly. This bit twice
 `test_console.js` is that harness. No dependencies, no network, no browser:
 
 ```bash
-node test_console.js                    # 50 checks, exit 0 = clean
+node test_console.js                    # 52 checks, exit 0 = clean
 node test_console.js old-console.html   # point it at an older copy
 ```
 
@@ -804,18 +844,19 @@ something instead of asserting against itself.
   line in `buildCmd()`; left for a session that can re-run a Toronto tile and
   eyeball the export.
 - **macOS pass, 2026-09-01.** Node 26.8.1 installed via Homebrew, so
-  `node test_console.js` runs here → 50/50; `python3 test_export.py` → 32/32.
+  `node test_console.js` runs here → 52/52; `python3 test_export.py` → 36/36.
   `verify_bambu.py` put all three plate shapes through the real Bambu Studio CLI
-  on macOS and passed, and its `find_bambu()` was widened to cover
-  `Bambu Studio.app` (with a space), `~/Applications`, and a `PATH` fallback.
-  `cmd2mac.py` was added for the `python` → `python3` rewrite. The in-browser
-  console *has* now been driven end to end here — real Toronto previews (square
-  and hex) built and rendered correctly (this is also what caught the
-  inside-out `FrontSide` bug and confirmed the cube cover). A real
+  on macOS and passed (re-run after the frame/cover signature change), and its
+  `find_bambu()` was widened to cover `Bambu Studio.app` (with a space),
+  `~/Applications`, and a `PATH` fallback. `cmd2mac.py` was added for the
+  `python` → `python3` rewrite. The in-browser console *has* now been driven
+  end to end here — real Toronto previews (square, hex, and `?mode=terrain`
+  with 4 elevation bands) built and rendered correctly; this is what caught the
+  inside-out `FrontSide` bug and confirmed the cube cover. A real
   `--split --box` build runs on every preview now (`serve.py` `cfg_from`), so
   the parallel-fetch path has had a live exercise; a bare-CLI invocation still
-  has not. `--tile-shape hex` / `circle` verified through a live preview;
-  `verify_bambu.py` has **not** been re-run on a hex/circle plate.
+  has not. `verify_bambu.py` has **not** been re-run on a hex/circle or a
+  terrain-band plate.
 - **A preview is still slow, just no longer additive.** The six Overture scans
   now run at once (see **Fetching**), so a build costs the slowest query rather
   than the sum — a 1.6 km London tile was 11m15s end to end, of which 4m10s was
