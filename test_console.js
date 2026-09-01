@@ -281,6 +281,42 @@ check('a new preview resets elapsed to ~0 rather than continuing the old count',
   G.stopClock(g2);
 });
 
+/* ---------------- the per-layer build status ---------------- */
+console.log('\nthe build preview shows each layer\'s state:');
+check('parseLayers reads [layer] lines, survives Ticker \\r spam, and accumulates', () => {
+  eq(typeof G.parseLayers, 'function', 'parseLayers');
+  const acc = {};
+  // poll 1: elevation loading, three layers announced fetching
+  G.parseLayers([
+    '[  0.0s] -> load terrain',
+    '   downloading 6 elevation tiles: 3/6 (50.0%)  eta 1s',
+    '[layer] water: fetching',
+    '[layer] buildings: fetching',
+    '[layer] roads: fetching',
+  ], acc);
+  eq(acc.water.state, 'now', 'water should be fetching');
+  eq(acc.elevation.state, 'now', 'elevation should be loading');
+  eq(acc.elevation.det, '3/6', 'elevation progress not picked up');
+  // poll 2: the water "done" line is buried at the tail of a Ticker progress line
+  G.parseLayers([
+    'draping roads: 4/12 ( 33%)  eta 0.0s   [layer] water: 26 rows in 12s',
+    '[layer] buildings: 1266 rows in 71s',
+  ], acc);
+  eq(acc.water.state, 'done', 'a [layer] line mid-Ticker-spam was missed');
+  ok(/26 rows/.test(acc.water.det), 'water detail lost: ' + acc.water.det);
+  eq(acc.buildings.state, 'done', 'buildings not marked done');
+  // poll 3: roads never reported done, but meshing has started -> infer done
+  eq(acc.roads.state, 'now', 'roads should still be fetching before meshing');
+  G.parseLayers(['[ 80.1s] -> mesh buildings'], acc);
+  eq(acc.roads.state, 'done', 'meshing started but roads still shows fetching');
+  // an empty layer reads as empty, not done
+  G.parseLayers(['[layer] land_cover: empty in 5s'], acc);
+  eq(acc.land_cover.state, 'empty', 'an empty layer should read empty');
+  const rows = G.layerRows(acc);
+  ok(rows.length >= 4 && rows.every(r => r.label && r.state), 'layerRows shape wrong');
+  eq(rows[0].label, 'elevation', 'elevation should sort first');
+});
+
 /* ---------------- 3. the draw-a-tile ghost rectangle ---------------- */
 console.log('\ndragging a tile never leaves a second box behind:');
 function layersOnMap() { return mapLayers.size; }

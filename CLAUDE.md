@@ -423,6 +423,20 @@ This does not change the empty-result handling: `_confirm_empty()` still runs
 per layer, and `FETCH_ERRORS` is appended under the same lock-free pattern it
 always used (each worker touches a different layer key).
 
+**Per-layer status.** Each worker prints `[layer] <name>: fetching` when it
+starts and `[layer] <name>: <N> rows in <t>s` (or `empty` / `failed`) when it
+finishes — from *inside* the worker, because `pool.map` yields in job order,
+not completion order. The console's `parseLayers()` greps these out of the
+`/api/status` line stream (the match is not anchored: a Ticker `\r` can prepend
+progress text to the line) and **accumulates** across polls — a layer's
+`fetching` line can scroll past `lines[-120:]` before its done line lands, so a
+known state is never cleared. Once any `-> mesh` / `-> repair` / `-> write`
+line appears, every layer still `fetching` is marked done. The build overlay
+draws these as an indented per-layer list under "Fetching data and building",
+each row a spinner / ✓ / ∅ / × with its row count and time — so a buyer
+watching a 4-minute build sees six scans running at once and which one is the
+long pole, not just the newest log line.
+
 ## Print-volume rules
 
 Target machine is a **Bambu Lab P1S**. The machine is 256 mm in every axis, but
@@ -891,7 +905,7 @@ a call to a function that no longer exists passes cleanly. This bit twice
 `test_console.js` is that harness. No dependencies, no network, no browser:
 
 ```bash
-node test_console.js                    # 58 checks, exit 0 = clean
+node test_console.js                    # 59 checks, exit 0 = clean
 node test_console.js old-console.html   # point it at an older copy
 ```
 
@@ -933,7 +947,7 @@ something instead of asserting against itself.
   line in `buildCmd()`; left for a session that can re-run a Toronto tile and
   eyeball the export.
 - **macOS pass, 2026-09-01.** Node 26.8.1 installed via Homebrew, so
-  `node test_console.js` runs here → 58/58; `python3 test_export.py` → 42/42.
+  `node test_console.js` runs here → 59/59; `python3 test_export.py` → 42/42.
   `verify_bambu.py` put all three plate shapes through the real Bambu Studio CLI
   on macOS and passed (re-run after the frame/cover signature change), and its
   `find_bambu()` was widened to cover `Bambu Studio.app` (with a space),

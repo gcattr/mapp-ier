@@ -1000,10 +1000,26 @@ def fetch_all_overture(cfg):
     out = {}
 
     def run(job):
+        # One line per layer, start and finish, so the console can show each
+        # scan's state instead of just the newest log line. Printed from INSIDE
+        # the worker (pool.map yields in job order, not completion order), with
+        # a fixed `[layer] <name>: ` prefix the browser greps for anywhere in
+        # the line -- a Ticker \r can prepend progress text to it.
         name, theme, typ, cols, where = job
+        t0 = time.time()
+        print(f"[layer] {name}: fetching", file=sys.stderr, flush=True)
         cur = con.cursor()
         try:
-            return name, fetch(cfg, cur, release, theme, typ, cols, where)
+            rows = fetch(cfg, cur, release, theme, typ, cols, where)
+            dt = time.time() - t0
+            n = len(rows)
+            state = f"{n} rows in {dt:.0f}s" if n else f"empty in {dt:.0f}s"
+            print(f"[layer] {name}: {state}", file=sys.stderr, flush=True)
+            return name, rows
+        except Exception as e:
+            print(f"[layer] {name}: failed ({str(e).splitlines()[0][:80]})",
+                  file=sys.stderr, flush=True)
+            raise
         finally:
             try:
                 cur.close()

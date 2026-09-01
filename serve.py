@@ -270,7 +270,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return self._json({"error": "no such job"}, 404)
                 return self._json({
                     "done": job["done"], "error": job["error"],
-                    "lines": job["lines"][-40:],
+                    # Enough tail that a layer's "fetching" line is still in the
+                    # window when its "N rows" line lands, even behind Ticker
+                    # progress spam. The console also accumulates across polls.
+                    "lines": job["lines"][-120:],
                     "elapsed": round(time.time() - job["started"], 1),
                 })
 

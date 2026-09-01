@@ -112,6 +112,17 @@ header .spacer{flex:1}
 .buildlog .step.pend{color:var(--ink-40)}
 .buildlog .step.now{font-weight:500}
 .buildlog .step .det{margin-left:auto;color:var(--ink-40);font-size:10.5px}
+.buildlog .rows{display:grid;gap:2px;margin:1px 0 3px 22px}
+.buildlog .lrow{display:flex;gap:7px;align-items:baseline;font-size:10.5px;
+  color:var(--ink-70)}
+.buildlog .lrow .lmark{width:11px;flex:none;color:var(--ink-40)}
+.buildlog .lrow.done .lmark{color:#2E8B4C}
+.buildlog .lrow.now  .lmark{color:#2E6FB7}
+.buildlog .lrow.fail .lmark{color:var(--warn)}
+.buildlog .lrow.wait{color:var(--ink-40)}
+.buildlog .lrow .ldet{margin-left:auto;color:var(--ink-40)}
+@keyframes lspin{to{transform:rotate(360deg)}}
+.buildlog .lrow.now .lmark{display:inline-block;animation:lspin 1s linear infinite}
 .buildlog .elapsed-row{display:flex;justify-content:space-between;
   border-top:1px dotted var(--rule);margin-top:4px;padding-top:5px;
   font-weight:500;color:var(--ink)}
@@ -1992,7 +2003,8 @@ async function buildExact(signal){
   if(j.error) throw new Error(j.error);
   s0.state='done'; s0.det='job ' + j.id;
 
-  const sLog = step('Running map2model.py'); drawLog(NOTE, true);
+  const sLog = step('Fetching data and building'); drawLog(NOTE, true);
+  const acc = {};                       // per-layer state, accumulated
   let last='';
   for(;;){
     if(signal.aborted) throw Object.assign(new Error('cancelled'),{cancelled:true});
@@ -2000,12 +2012,20 @@ async function buildExact(signal){
     const st = await (await fetch('/api/status?id='+j.id)).json();
     if(!isCurrent(gen) || signal.aborted)
       throw Object.assign(new Error('cancelled'),{cancelled:true});
-    const line = (st.lines||[]).filter(l=>l.trim() && !l.startsWith('[warn]')).pop();
-    if(line && line !== last){ last=line; sLog.det = line.slice(0,68); drawLog(NOTE, true); }
+    parseLayers(st.lines||[], acc);
+    sLog.rows = layerRows(acc);
+    // the headline detail: what stage the exporter is in right now
+    const stage = (st.lines||[]).filter(l=>/^\[[\s\d.]*s?\]?\s*->/.test(l) || /^\s*->/.test(l)).pop();
+    const line = (st.lines||[]).filter(l=>l.trim() && !l.startsWith('[warn]') && !l.startsWith('[layer]')).pop();
+    const det = (stage||line||'').replace(/^\[[^\]]*\]\s*->?\s*/,'').replace(/^->\s*/,'').slice(0,44);
+    if(det !== last){ last=det; sLog.det = det; }
+    drawLog(NOTE, true);
     $('prevStatus').textContent = 'building · ' + st.elapsed + 's';
     if(st.error) throw new Error(String(st.error).trim().split('\n').pop());
     if(st.done) break;
   }
+  for(const k in acc) if(acc[k].state==='now') acc[k].state='done';
+  sLog.rows = layerRows(acc);
   sLog.state='done'; sLog.det='exporter finished';
 
   const sM = step('Loading the mesh'); drawLog(NOTE, true);
@@ -2447,10 +2467,16 @@ let logSteps = [];
 function drawLog(note, cancellable){
   const icon = s => s.state==='done' ? '✓' : s.state==='fail' ? '×'
                   : s.state==='now' ? '▸' : '·';
+  const licon = st => st==='done' ? '✓' : st==='fail' ? '×'
+                    : st==='empty' ? '∅' : st==='now' ? '◐' : '·';
+  const rows = s => !s.rows || !s.rows.length ? '' :
+    `<div class="rows">${s.rows.map(r=>
+      `<div class="lrow ${r.state}"><span class="lmark">${licon(r.state)}</span>
+       <span>${r.label}</span><span class="ldet">${r.det||''}</span></div>`).join('')}</div>`;
   $('prevOverlay').innerHTML =
     `<div class="buildlog">${logSteps.map(s=>
       `<div class="step ${s.state}"><span class="mark">${icon(s)}</span>
-       <span>${s.label}</span><span class="det">${s.det||''}</span></div>`).join('')}
+       <span>${s.label}</span><span class="det">${s.det||''}</span></div>${rows(s)}`).join('')}
       <div class="elapsed-row"><span>elapsed</span><span id="elapsed">${
         elapsed().toFixed(1)}s</span></div>
       ${note ? `<div class="note">${note}</div>` : ''}</div>`
@@ -2462,7 +2488,47 @@ function drawLog(note, cancellable){
   });
 }
 
-function step(label){ const s={label, state:'now', det:''}; logSteps.push(s); return s; }
+function step(label){ const s={label, state:'now', det:'', rows:[]}; logSteps.push(s); return s; }
+
+/* Parse the exporter's line stream into a per-layer state map. Called every
+   poll; ACCUMULATES - a layer's "fetching" line can scroll out of the status
+   tail before its "done" line lands, so we never clear a known state. The
+   exporter prints `[layer] <name>: <state>`; a Ticker \r can prepend progress
+   text, so the match is not anchored to the line start. */
+const LAYER_ORDER = ['elevation','water','roads','land_cover','land_use','buildings','parts'];
+const LAYER_LABEL = {elevation:'elevation', water:'water', roads:'roads',
+  land_cover:'greenery', land_use:'parks & land use', buildings:'buildings',
+  parts:'building parts'};
+function parseLayers(lines, acc){
+  lines = lines || []; acc = acc || {};
+  for(const raw of lines){
+    let m = raw.match(/\[layer\]\s+(\w+):\s*(.+?)\s*$/);
+    if(m){
+      const name = m[1], s = m[2];
+      acc[name] = /fetching/.test(s)      ? {state:'now',  det:''}
+                : /failed/.test(s)         ? {state:'fail', det:s.replace(/^failed\s*/,'')}
+                : /empty/.test(s)          ? {state:'empty',det:s}
+                : {state:'done', det:s};
+      continue;
+    }
+    // elevation tiles come from a different path (terrarium, not Overture)
+    if(/->\s*load terrain\b/.test(raw))      acc.elevation = acc.elevation||{state:'now',det:''};
+    m = raw.match(/downloading\s+\d+\s+elevation tiles?:\s*([\d/]+)/);
+    if(m && (!acc.elevation || acc.elevation.state==='now'))
+      acc.elevation = {state:'now', det:m[1]};
+    if(/load terrain:\s*[\d.]+s/.test(raw) && (!acc.elevation || acc.elevation.state==='now'))
+      acc.elevation = {state:'done', det:raw.match(/([\d.]+s)/)[1]};
+  }
+  // once meshing starts, any layer still "now" has finished fetching
+  if(lines.some(l=>/->\s*(mesh|dissolve|project \+ clean|repair|write 3mf)/.test(l)))
+    for(const k in acc) if(acc[k].state==='now') acc[k].state = 'done';
+  return acc;
+}
+function layerRows(acc){
+  acc = acc || {};
+  return LAYER_ORDER.filter(k=>acc[k]).map(k=>({
+    label: LAYER_LABEL[k]||k, state: acc[k].state, det: acc[k].det||''}));
+}
 
 /* A build that is cancelled only notices at its next `await`, so the previous
    run lives on for up to a poll interval AFTER the new one has started. Without
