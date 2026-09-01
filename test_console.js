@@ -887,7 +887,8 @@ check('the span slider opens up for a circuit and wide open for a relief map', (
   ok(+document.getElementById('span').max >= 100000,
     'terrain mode must allow a whole-park tile: ' + document.getElementById('span').max);
   G.setMode('city');
-  eq(String(document.getElementById('span').max), '3000', 'city mode did not restore the span slider');
+  // city reaches 8 km = 1:40,000 at the 200 mm print size
+  eq(String(document.getElementById('span').max), '8000', 'city mode did not restore the span slider');
 });
 
 /* ---------------- camera ---------------- */

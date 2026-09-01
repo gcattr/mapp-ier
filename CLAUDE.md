@@ -13,7 +13,7 @@ files.
 | `serve.py` | Local HTTP server: serves the console AND runs the exporter behind it. |
 | `map2model-console.html` | The web console. Single file, no build step. |
 | `test_console.js` | Offline harness for the console: stubs the DOM, Leaflet and three.js and invokes every top-level function. `node test_console.js`. |
-| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 42 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
+| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 44 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
 | `verify_bambu.py` | Loads each plate shape through the Bambu Studio CLI, has it re-export, and reads the filaments and per-part extruders back out. Skips cleanly when Bambu Studio is not installed. See **Verifying it**. |
 | `bambu_p1s_0.4.json` | A P1S 0.4 nozzle project config that Bambu Studio itself wrote (v02.05.00.66). `_project_settings()` widens its per-slot lists and writes our filaments in. Version-coupled — see **Known gaps**. |
 | `landmarks.json` | Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it **silently** when it is absent — so if it goes missing the CN Tower renders as straight prisms in preview *and* export, with no warning anywhere. It is tracked in git for exactly that reason. |
@@ -200,6 +200,15 @@ finer zoom reduces it but does not remove it.
 
 **Layer heights** match between exporter and preview: greenery 0.8 mm proud,
 roads 0.5 mm, water 0.6 mm, all embedded 0.35 mm into what's below.
+
+**The shoreline ramps, it is not a wall.** `build_drape(..., shore=…)` pulls a
+slab's top down to the water datum over `Config.shore_ramp_mm` (3 mm of print)
+of horizontal run where it meets water, via a smoothstep `min` against the true
+relief. A real cliff keeps its full height — only its face is pulled back to a
+`shore_ramp_mm`-wide slope, so a shore edge never prints as a paper sheet. See
+**Terrain mode** for the full note; the knob is shared by `build_terrain_bands`
+and the `run()` land plinth, so it affects city/route `water_in_frame` tiles as
+well as terrain relief. `0` restores the old vertical cut.
 
 **Blanket greenery.** `base/land_cover` is derived from a coarse global raster
 and dissolved into continent-sized multipolygons. The `forest` feature covering
@@ -475,6 +484,13 @@ Resolution: aim under 8 m/mm. `--min-feature 0.9` widens anything thinner so it
 prints, which is why a 2 m mast comes out proportionally fat on a coarse tile.
 The console shows this as a 1:N ratio with a warning past the threshold.
 
+**City tiles go up to 8 km = 1:40,000** (`SPAN_MAX.city`, was 3 km). That is
+40 m/mm — far past the 8 m/mm line, so the console shows the hard "too coarse —
+detail will be lost" warning the whole way there, but it does **not** block
+(same warn-don't-block rule as the cover). A buyer who wants their whole city
+in one tile can have it; the ratio readout and the warning tell them what they
+are trading. `test_console.js` pins `SPAN_MAX.city === 8000`.
+
 ## Tile shapes
 
 `--tile-shape square | hex | circle` (`Config.tile_shape`, default `square`).
@@ -554,7 +570,8 @@ slice's top *follows the real relief*; above it the top is a flat lid the next
 slice up hides. The finished model's visible surface is the true smooth terrain
 with the colour changing at contour lines — **not** stepped plateaus (that was
 the earlier `prism`-to-`edges[k+1]` design, which read as a ziggurat). Slices
-still nest and lean on each other; water is cut clean through every one. Slice 1
+still nest and lean on each other; water is cut through every one — but the cut
+edge **ramps to a beach**, it is not a seawall (see below). Slice 1
 is the object `terrain`; `terrain_2..5` default down `TERRAIN_RAMP` (lowland
 green → upland green → tan → grey rock → snow, all stock keys). A 5th slice
 spills to its own `_plate2` file; `serve.py` globs every `<stem>_*.3mf` sibling.
@@ -579,6 +596,23 @@ coincident vertices on the perimeter walls (the only shared verts are buried
 bottom rings at z=0). `polygonOffset` was considered and rejected — the slices
 genuinely interpenetrate, so a depth bias trades a static artifact for a
 camera-angle-dependent one.
+
+**The shore ramps to a beach, not a wall.** Where a slab meets water its top
+used to drop straight to the bed — a full-relief vertical face all round the
+lake (13 mm+ on an alpine tile), the "massive cut off". `build_drape`'s new
+`shore=(water_union, beach_m, water_z_mm)` instead ramps the top **down to the
+water datum** over `beach_m` — `top_z = min(top_z, wz + smoothstep(d/beach_m)·
+(top_z − wz))`, `d` = per-vertex distance to the water (vectorised
+`shapely.distance`, on a `beach/8`-simplified outline; pieces further than
+`beach_m` from water skip it entirely). Because it is a `min` against the true
+relief, a **genuine cliff keeps its height** — its face is just pulled back to
+a `beach_m`-wide slope, so a shore edge is never a paper sheet. `beach_m =
+Config.shore_ramp_mm / S.xy` (default **3 mm of print**, `--shore-ramp-mm`,
+`0` = the old hard cut). Applied in `build_terrain_bands`'s `slab()` **and**
+the `run()` land-plinth `build_drape` (so city/route `water_in_frame` tiles
+get it too). Verified on Moraine Lake: 400+ terrain top-verts pulled to the
+3 mm datum at the waterline with a graded ramp to the true height inland;
+watertight; `verify_bambu` PASS.
 
 `filament_of()` folds `terrain_2..terrain_5` to a ramp default or a buyer
 pick (`_band_index()`); `parse_filaments()` accepts those keys; they are
@@ -893,7 +927,7 @@ What it covers is everything *after* geometry: which filament each layer gets,
 what lands in the 3MF, and whether a slicer can read it back.
 
 ```bash
-python test_export.py                   # 42 checks, exit 0 = clean
+python test_export.py                   # 44 checks, exit 0 = clean
 ```
 
 Every check in it is a bug that shipped. The cover one in particular: the cover
@@ -965,7 +999,7 @@ something instead of asserting against itself.
   line in `buildCmd()`; left for a session that can re-run a Toronto tile and
   eyeball the export.
 - **macOS pass, 2026-09-01.** Node 26.8.1 installed via Homebrew, so
-  `node test_console.js` runs here → 60/60; `python3 test_export.py` → 42/42.
+  `node test_console.js` runs here → 60/60; `python3 test_export.py` → 44/44.
   `verify_bambu.py` put all three plate shapes through the real Bambu Studio CLI
   on macOS and passed (re-run after the frame/cover signature change), and its
   `find_bambu()` was widened to cover `Bambu Studio.app` (with a space),
@@ -994,8 +1028,19 @@ something instead of asserting against itself.
   nesting 10.6 → 33.3 mm. `verify_bambu.py` PASSed on that plate (four terrain
   slices → slots 1–4) — first time a terrain-band plate has been verified
   through Bambu. `terrain_zoom_for()` picks z8 for a 180 km tile. **Not** yet
-  seen: a genuinely park-sized (100 km+) tile built end to end, and the new
-  draped slices in the browser preview.
+  seen: a genuinely park-sized (100 km+) tile built end to end.
+- **Shoreline beach + 1:40,000 city, phase 4d.** `build_drape(shore=…)` ramps
+  the plinth edge down to the water datum over `Config.shore_ramp_mm` (3 mm)
+  instead of a vertical seawall; a cliff keeps its height with a `shore`-wide
+  slope. `SPAN_MAX.city` raised 3 km → 8 km so a city tile can reach 1:40,000
+  (warns hard, does not block). Verified live: Moraine Lake terrain build (CLI
+  **and** `serve.py` preview), 400+ terrain top-verts pulled to the datum at
+  the waterline with a graded ramp inland, watertight, `verify_bambu` PASS, and
+  the browser 3D preview shows a sloped bank all round the lake rather than a
+  wall. `test_export.py` 44/44, `test_console.js` 60/60. **Not** re-checked: a
+  coastal *city* (`water_in_frame`, non-terrain) tile — the ramp is on that
+  path too but only terrain tiles have been eyeballed; and `--shore-ramp-mm 0`
+  (the old hard cut) has a test but no live build.
 - **A preview is still slow, just no longer additive.** The six Overture scans
   now run at once (see **Fetching**), so a build costs the slowest query rather
   than the sum — a 1.6 km London tile was 11m15s end to end, of which 4m10s was

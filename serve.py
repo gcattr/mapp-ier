@@ -94,6 +94,7 @@ def cfg_from(q):
         route_name=q.get("route_name", [""])[0],
         route_width_m=num("route_width_m", 12.0),
         route_height_mm=num("route_height_mm", 1.6),
+        shore_ramp_mm=num("shore_ramp_mm", 3.0),
         z_exaggeration=num("zexag", 1.0),
         building_scale=num("building_scale", 1.0),
         terrain=flag("terrain", True),

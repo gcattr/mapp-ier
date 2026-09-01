@@ -354,10 +354,90 @@ def _slices_do_not_zfight():
     assert lid < contour - 1e-3, f"slice 1 lid {lid:.3f} not dropped below contour {contour:.3f}"
 
 
+class _Plateau:
+    """Constant high ground: a water cut-out has a full-height wall around it
+    unless the shore ramp pulls the edge down."""
+    flat = False
+
+    def __init__(self, h=150.0):
+        self.h = h
+
+    def elev_xy(self, x, y):
+        import numpy as _np
+        return _np.full(_np.shape(x), float(self.h))
+
+
+def _shore_ramps_not_a_seawall():
+    """`shore=` ramps the plinth edge down to the water datum over a beach
+    instead of dropping it as a vertical wall - and a genuine cliff keeps its
+    height but its face is pulled back to a printable slope, never a sheet."""
+    from shapely.geometry import box
+    proj = _Proj(800.0)
+    M.terr_min[0] = 0.0
+    M.terr_relief_scale[0] = 1.0
+    S = M.Scale(xy=200.0 / 1600.0, z=200.0 / 1600.0)
+    bbox_poly = box(proj.minx, proj.miny, proj.maxx, proj.maxy)
+    lake = box(-200, -200, 200, 200)
+    land = bbox_poly.difference(lake)
+    cfg = M.Config(bbox=(0, 0, 1, 1), shore_ramp_mm=6.0)
+    beach_m = cfg.shore_ramp_mm / S.xy                       # 6 mm -> 48 m
+    hard = M.build_drape(cfg, proj, _Plateau(150.0), S, [land], 0.0, 0.0,
+                         flat_bottom=0.0)
+    soft = M.build_drape(cfg, proj, _Plateau(150.0), S, [land], 0.0, 0.0,
+                         flat_bottom=0.0, shore=(lake, beach_m, cfg.base_mm))
+    full = 150.0 * S.z + cfg.base_mm
+    rng = full - cfg.base_mm
+
+    def tops_and_dist(vf):
+        V = vf[0]
+        top = V[V[:, 2] > cfg.base_mm - 1e-6]
+        mx, my = top[:, 0] / S.xy, top[:, 1] / S.xy         # back to metres
+        d = np.maximum(np.maximum(np.abs(mx) - 200.0, np.abs(my) - 200.0), 0.0)
+        return top[:, 2], d
+
+    hz, _ = tops_and_dist(hard)
+    sz, sd = tops_and_dist(soft)
+    assert hz.min() > full - 1.0, ("hard cut should be a seawall", hz.min(), full)
+
+    shore = sz[sd < 5.0]
+    assert len(shore) and shore.max() < cfg.base_mm + 0.2 * rng, \
+        ("shore not ramped down to the water", shore.max() if len(shore) else None)
+    inland = sz[sd > 1.5 * beach_m]
+    assert len(inland) and inland.min() > full - 1.0, \
+        ("true height lost away from the water", inland.min() if len(inland) else None)
+    mid = sz[(sz > cfg.base_mm + 0.1 * rng) & (sz < full - 0.05 * rng)]
+    assert len(mid) >= 3, \
+        ("shore is a cliff face, not a ramp: heights " + str(sorted(sz.round(1))))
+
+
+def _shore_ramp_reaches_the_bands():
+    """build_terrain_bands wires the ramp through: the base slice's shore is
+    pulled down to the datum, not left as a wall."""
+    from shapely.geometry import box
+    proj = _Proj(800.0)
+    M.terr_min[0] = 0.0
+    M.terr_relief_scale[0] = 1.0
+    S = M.Scale(xy=200.0 / 1600.0, z=200.0 / 1600.0)
+    bbox_poly = box(proj.minx, proj.miny, proj.maxx, proj.maxy)
+    lake = box(-160, -160, 160, 160)
+    cfg = M.Config(bbox=(0, 0, 1, 1), mode="terrain", terrain_bands=3,
+                   shore_ramp_mm=6.0)
+    out = M.build_terrain_bands(cfg, proj, _Plateau(150.0), S, bbox_poly, [lake])
+    base = dict(out)["terrain"][0]
+    top = base[base[:, 2] > cfg.base_mm - 1e-6]
+    mx, my = top[:, 0] / S.xy, top[:, 1] / S.xy
+    d = np.maximum(np.maximum(np.abs(mx) - 160.0, np.abs(my) - 160.0), 0.0)
+    shore = top[d < 5.0, 2]
+    assert len(shore) and shore.min() < cfg.base_mm + 3.0, \
+        ("bands shore not ramped", shore.min() if len(shore) else None)
+
+
 check("elevation band keys terrain_2..5 are recognised", _band_keys_recognised)
 check("bands default down the ramp and take a pick", _band_filaments_default_down_the_ramp)
 check("terrain slices drape on the relief and nest, not stepped plateaus", _slices_follow_the_relief)
 check("terrain slices are inset and lid-dropped so they do not Z-fight", _slices_do_not_zfight)
+check("the shore ramps to a beach, not a seawall, and a cliff keeps a falloff", _shore_ramps_not_a_seawall)
+check("the shore ramp reaches the elevation bands", _shore_ramp_reaches_the_bands)
 
 
 # ------------------------------------------------------------- route mode

@@ -452,7 +452,7 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
         <input type="number" id="cLat" step="0.0001" aria-label="Centre latitude">
         <input type="number" id="cLng" step="0.0001" aria-label="Centre longitude"></div>
       <div class="row"><label class="t" for="span">Tile width</label>
-        <input type="range" id="span" min="400" max="3000" step="50" value="1600">
+        <input type="range" id="span" min="400" max="8000" step="50" value="1600">
         <span class="val" id="vSpan">1600 m</span></div>
       <div class="row"><label class="t">Shape</label>
         <div class="seg" id="shapes" style="flex:1">
@@ -1036,7 +1036,9 @@ function activeFilms(){
 /* How wide the tile is allowed to get, per mode. A city stays a
    neighbourhood; a race circuit is ~7 km corner to corner; a relief map can
    be a whole national park (Banff is ~180 km across). */
-const SPAN_MAX  = { city: 3000, route: 8000, terrain: 300000 };
+// city tops out at 8 km: 8000 m / 200 mm = 1:40,000, the coarsest a buyer can
+// ask for. It warns hard past ~1:8,000 (mpmm > 8) but does not block.
+const SPAN_MAX  = { city: 8000, route: 8000, terrain: 300000 };
 const SPAN_STEP = { city: 50,   route: 50,   terrain: 1000 };
 let MAXSPAN = SPAN_MAX.city;
 function setMode(m){

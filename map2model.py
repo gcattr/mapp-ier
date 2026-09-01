@@ -293,6 +293,13 @@ class Config:
     # into a basin so land never sits below the water surface
     water_depth_mm: float = 1.2      # how far the basin is cut below the datum
     sea_level_mm: float = 0.0        # water surface, relative to the land datum
+    shore_ramp_mm: float = 3.0       # beach: the land plinth ramps DOWN to the
+                                     # water datum over this much PRINT width at
+                                     # the shore instead of dropping as a
+                                     # vertical seawall. A real cliff keeps a
+                                     # falloff at least this wide, so no shore
+                                     # edge is ever a paper-thin sheet. 0 = hard
+                                     # vertical cut (the old behaviour).
 
     # optional display frame + separable water insert
     frame: bool = False
@@ -1931,7 +1938,8 @@ def build_terrain(cfg, proj, terr, S, water_polys=None):
 
 
 def build_drape(cfg, proj, terr, S, polys, thickness_mm, embed_mm,
-                cell_m=None, label="draping", flat_bottom=None, top_cap_mm=None):
+                cell_m=None, label="draping", flat_bottom=None, top_cap_mm=None,
+                shore=None):
     """
     Slab that follows the terrain: bottom sunk `embed` into it, top `thickness`
     above. Large polygons are grid-split first so they actually follow relief.
@@ -1940,8 +1948,15 @@ def build_drape(cfg, proj, terr, S, polys, thickness_mm, embed_mm,
     constant z where the relief rises past it - that is how an elevation slice
     keeps a smooth terrain-following surface within its own band and a flat lid
     above (hidden under the next slice up).
+
+    `shore` = (water_union, beach_m, water_z_mm): where the slab's edge meets
+    that water it ramps the top DOWN to `water_z_mm` over `beach_m` metres
+    instead of walling straight off - a printed beach. Because the ramp is
+    `min(true relief, blend)`, a genuine cliff keeps its height but its face is
+    pulled back to a `beach_m`-wide slope, so the edge is never a paper sheet.
     """
     from shapely.geometry import box
+    import shapely
     acc = MeshAccum()
     cell = cell_m or max(30.0, (proj.maxx - proj.minx) / 40.0)
     tk = Ticker(len(polys), label, cfg.verbose)
@@ -1982,6 +1997,19 @@ def build_drape(cfg, proj, terr, S, polys, thickness_mm, embed_mm,
             top_z = gz + thickness_mm
             if top_cap_mm is not None:
                 top_z = np.minimum(top_z, top_cap_mm)
+            if shore is not None:
+                wu_s, beach_m, wz = shore
+                if beach_m > 1e-6 and p.distance(wu_s) < beach_m:
+                    try:
+                        dd = shapely.distance(
+                            wu_s, shapely.points(V2[:, 0], V2[:, 1]))
+                    except Exception:            # shapely < 2.0
+                        from shapely.geometry import Point
+                        dd = np.array([wu_s.distance(Point(a, b))
+                                       for a, b in zip(V2[:, 0], V2[:, 1])])
+                    f = np.clip(dd / beach_m, 0.0, 1.0)
+                    f = f * f * (3.0 - 2.0 * f)          # smoothstep
+                    top_z = np.minimum(top_z, wz + f * (top_z - wz))
             top = np.column_stack([px, py, top_z])
             V = np.vstack([bot, top])
             faces = [F[:, ::-1], F + n]
@@ -2093,6 +2121,15 @@ def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
     zpm = terr_relief_scale[0] * S.z             # metres of relief -> mm
     inset_m = 0.3 / S.xy                         # ~0.3 mm of print, in metres
 
+    # Beach: where a slice meets water its edge ramps down to the datum instead
+    # of dropping as a wall (see build_drape). Simplify the water outline for
+    # the per-vertex distance test - sub-(beach/8) wobble is invisible.
+    shore = None
+    if wu is not None and cfg.shore_ramp_mm > 0:
+        beach_m = cfg.shore_ramp_mm / S.xy
+        shore = (wu.simplify(max(1.0, beach_m / 8.0), preserve_topology=False),
+                 beach_m, cfg.base_mm)
+
     def slab(region, cap_mm, label, inset=False):
         """Draped solid: flat on the bed, top = min(relief, cap)."""
         region = region.intersection(bbox_poly)
@@ -2108,7 +2145,8 @@ def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
         if not polys:
             return None
         return build_drape(cfg, proj, terr, S, polys, 0.0, 0.0,
-                           label=label, flat_bottom=0.0, top_cap_mm=cap_mm)
+                           label=label, flat_bottom=0.0, top_cap_mm=cap_mm,
+                           shore=shore)
 
     # a flat tile, or one slice asked for: a single smooth relief surface
     if emax < 1.0 or n == 1:
@@ -3424,9 +3462,18 @@ def run(cfg, out_path):
         # onto - whether or not water rides the frame.
         with Stage("mesh terrain (water cut out)", cfg.verbose):
             land = bbox_poly
+            shore = None
             if water_p:
                 try:
-                    land = bbox_poly.difference(unary_union(water_p))
+                    wu = unary_union(water_p)
+                    land = bbox_poly.difference(wu)
+                    if cfg.shore_ramp_mm > 0:
+                        # ramp the plinth edge down to the datum at the water,
+                        # not a vertical seawall - see build_drape
+                        bm = cfg.shore_ramp_mm / S.xy
+                        shore = (wu.simplify(max(1.0, bm / 8.0),
+                                             preserve_topology=False),
+                                 bm, cfg.base_mm)
                 except Exception:
                     land = bbox_poly
             lands = (list(land.geoms)
@@ -3436,7 +3483,7 @@ def run(cfg, out_path):
             raw.append(("terrain",
                         build_drape(cfg, proj, terr, S, lands, 0.0, 0.0,
                                     label="building land plinth",
-                                    flat_bottom=0.0)))
+                                    flat_bottom=0.0, shore=shore)))
     else:
         with Stage("mesh terrain", cfg.verbose):
             raw.append(("terrain", build_terrain(cfg, proj, terr, S, water_p)))
@@ -3751,6 +3798,12 @@ def main():
                     help="needle tip width relative to the mast (default 0.30)")
     ap.add_argument("--water-depth", type=float, default=1.2,
                     help="how deep the water basin is cut into the land (mm)")
+    ap.add_argument("--shore-ramp-mm", type=float, default=3.0,
+                    help="beach: the land plinth ramps down to the water datum "
+                         "over this much print width at the shore instead of a "
+                         "vertical wall. A real cliff keeps a falloff at least "
+                         "this wide so no shore edge prints paper-thin. "
+                         "0 = hard vertical cut.")
     ap.add_argument("--floating-parts", default="ground",
                     choices=("ground", "drop", "keep"),
                     help="what to do with a building part that has nothing "
@@ -3900,6 +3953,7 @@ def main():
                  source=a.source, overpass_url=a.overpass_url,
                  spire_tip_ratio=a.spire_tip,
                  water_depth_mm=a.water_depth, sea_level_mm=a.sea_level,
+                 shore_ramp_mm=a.shore_ramp_mm,
                  duckdb_memory=a.duckdb_memory, duckdb_threads=a.duckdb_threads,
                  frame=a.frame, frame_width_mm=a.frame_width,
                  frame_depth_mm=a.frame_depth, frame_floor_mm=a.frame_floor,
