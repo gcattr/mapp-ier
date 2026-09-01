@@ -400,7 +400,7 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
       <div class="seg" id="modes">
         <button data-mode="city" class="on">City<br>buildings</button>
         <button data-mode="terrain">Terrain<br>elevation</button>
-        <button data-mode="route" disabled title="Coming soon">Route<br>soon</button>
+        <button data-mode="route">Route<br>ride / circuit</button>
       </div>
     </section>
 
@@ -423,6 +423,28 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
       <div class="hint" id="sizeNote"></div>
       <div class="row"><label class="t" for="out">File name</label>
         <input type="text" id="out" placeholder="placeholder.3mf" style="width:150px"></div>
+    </section>
+
+    <section id="routePanel" class="hidden">
+      <h2>The path</h2>
+      <div class="hint" id="routeHint">Name a circuit, load a ride file, or draw
+        the path on the map. The tile centres on it for you.</div>
+      <div class="row"><label class="t" for="routeQ">Named circuit</label>
+        <input type="text" id="routeQ" placeholder="Circuit de Spa-Francorchamps"
+          style="flex:1" aria-label="Circuit name">
+        <button id="routeFind">Look up</button></div>
+      <div class="row"><label class="t" for="routeGpx">Ride file</label>
+        <input type="file" id="routeGpx" accept=".gpx,.txt" style="flex:1"
+          aria-label="GPX file"></div>
+      <div class="row"><label class="t">On the map</label>
+        <span style="flex:1;display:flex;gap:6px">
+          <button id="routeDraw">Draw</button>
+          <button id="routeClear">Clear</button></span></div>
+      <div class="hint" id="routeStat">No path yet.</div>
+      <div class="hint sizewarn" id="routeWarn" hidden></div>
+      <div class="row"><label class="t" for="routeWidth">Path width</label>
+        <input type="range" id="routeWidth" min="4" max="40" step="1" value="12">
+        <span class="val" id="vRouteWidth">12 m</span></div>
     </section>
 
     <section>
@@ -544,7 +566,7 @@ const FILMS = [
   {k:'frame',    nm:'Frame',     note:'border + water plate', locked:true},
 ];
 const on  = {terrain:true, water:true, greenery:true, roads:true,
-             buildings:true, frame:true};
+             buildings:true, route:true, frame:true};
 
 /* The shop defaults. Mirrors DEFAULT_FILAMENTS in map2model.py. Band keys are
    deliberately NOT in here -- test_console.js pins this dict against Python's,
@@ -553,6 +575,7 @@ const DEFAULT_FILAMENTS = {
   terrain:'matte_grass_green', greenery:'basic_jade_white',
   roads:'basic_black',         buildings:'basic_gray',
   water:'matte_marine_blue',   frame:'basic_black',
+  route:'basic_red',
 };
 /* Elevation bands in Terrain mode. Mirrors TERRAIN_RAMP in map2model.py.
    Index 0 is the layer "terrain"; terrain_2..terrain_5 default down the rest. */
@@ -853,7 +876,7 @@ function finishDraw(ll){
   if(!drawing || !origin || !ll) return;
   const s=squareFrom(origin,ll);
   clearGhost();
-  centre={lat:s.lat,lng:s.lng}; spanM=Math.round(Math.min(s.span,3000)/50)*50;
+  centre={lat:s.lat,lng:s.lng}; spanM=Math.round(Math.min(s.span,MAXSPAN)/50)*50;
   $('span').value=spanM; $('btnDraw').click(); placeRect(false);
   tileChanged();
 }
@@ -892,14 +915,21 @@ $('sizes').querySelectorAll('button').forEach(b=>
     b.classList.add('on'); sync(); repaint();
   }));
 
-/* ---------------- what to make: city vs terrain ---------------- */
+/* ---------------- what to make: city / terrain / route ---------------- */
 let mode = 'city';
-const bandCount  = () => +($('bands').value || 1);
-const reliefMM   = () => +($('relief').value || 0);
+const bandCount   = () => +($('bands').value || 1);
+const reliefMM    = () => +($('relief').value || 0);
+const routeWidthM = () => +($('routeWidth').value || 12);
 /* The filament rows for the current mode. City is the full list; Terrain is
    the relief + water + frame, plus one row per elevation band above the
-   first. Bands are always on -- the band count is the control. */
+   first; Route is the path + water + frame. Locked rows are always on -- the
+   only control is the colour. */
 function activeFilms(){
+  if(mode === 'route') return [
+    {k:'route', nm:'Route',  note:'the path', locked:true},
+    {k:'water', nm:'Water',  note:'--no-water'},
+    {k:'frame', nm:'Frame',  note:'border + water plate', locked:true},
+  ];
   if(mode !== 'terrain') return FILMS;
   const out = [{k:'terrain', nm:'Elevation 1', note:'lowest', locked:true}];
   for(let n=2;n<=bandCount();n++)
@@ -908,15 +938,247 @@ function activeFilms(){
   out.push({k:'frame', nm:'Frame', note:'border + water plate', locked:true});
   return out;
 }
+/* The span slider tops out at 3 km for a city; a race circuit needs more
+   room (Spa is ~7 km corner to corner), so route mode widens it. */
+let MAXSPAN = 3000;
 function setMode(m){
-  mode = (m === 'terrain') ? 'terrain' : 'city';
+  mode = (m === 'terrain' || m === 'route') ? m : 'city';
   $('modes').querySelectorAll('button').forEach(x =>
     x.classList.toggle('on', x.dataset.mode === mode));
-  const terr = mode === 'terrain';
-  ['rowBands','rowRelief'].forEach(id => $(id).classList.toggle('hidden', !terr));
-  ['rowBscale','rowTerrainChk'].forEach(id => $(id).classList.toggle('hidden', terr));
+  const terr = mode === 'terrain', route = mode === 'route';
+  $('rowBands').classList.toggle('hidden', !terr);
+  $('rowRelief').classList.toggle('hidden', !(terr || route));
+  ['rowBscale','rowTerrainChk'].forEach(id =>
+    $(id).classList.toggle('hidden', terr || route));
+  $('routePanel').classList.toggle('hidden', !route);
+  MAXSPAN = route ? 8000 : 3000;
+  $('span').max = MAXSPAN;
+  if(route && drawing) $('btnDraw').click();      // drop the square-draw mode
+  if(!route && routeDrawing) $('routeDraw').click();
+  drawRouteLine();                                 // show/keep the path line
   drawFilms();
 }
+
+/* ---------------- route: a path drawn, uploaded or named ---------------- */
+let routePts = [];        // [[lat, lng], ...] in order, full resolution
+let routeCmd = [];        // routePts hard-simplified for the copied command
+let routeName = '';        // set only when it came from an OSM name lookup
+let routeLine = null;      // the Leaflet polyline overlay
+let routeDrawing = false;
+const ROUTE_CMD_CAP = 40;  // most points a drawn/uploaded path puts in the command
+
+/* Ramer-Douglas-Peucker in local metres. The drawn / uploaded path has to
+   survive being pasted into Etsy's personalisation field (~1024 chars), so
+   the copied command carries a hard-simplified copy - a named circuit skips
+   this entirely and ships just the name. */
+function rdp(pts, epsM){
+  if(pts.length < 3) return pts.slice();
+  const lat0 = pts[0][0] * Math.PI / 180;
+  const mLat = 111320, mLng = 111320 * Math.cos(lat0);
+  const P = pts.map(p => [p[1] * mLng, p[0] * mLat]);
+  const keep = new Array(pts.length).fill(false);
+  keep[0] = keep[pts.length - 1] = true;
+  const stack = [[0, pts.length - 1]];
+  while(stack.length){
+    const [a, b] = stack.pop();
+    const [ax, ay] = P[a], [bx, by] = P[b];
+    const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1;
+    let idx = -1, dmax = 0;
+    for(let i = a + 1; i < b; i++){
+      const [px, py] = P[i];
+      const d = Math.abs((px - ax) * dy - (py - ay) * dx) / len;
+      if(d > dmax){ dmax = d; idx = i; }
+    }
+    if(dmax > epsM && idx > 0){ keep[idx] = true; stack.push([a, idx], [idx, b]); }
+  }
+  return pts.filter((_, i) => keep[i]);
+}
+function simplifyRoute(pts, cap){
+  pts = pts || [];
+  let out = pts, eps = 2;
+  for(let i = 0; i < 26 && out.length > cap; i++){ out = rdp(pts, eps); eps *= 1.6; }
+  return out;
+}
+const routeStr = (pts, dp) =>
+  pts.map(p => p[0].toFixed(dp) + ',' + p[1].toFixed(dp)).join(';');
+
+/* Pull [[lat,lng],...] out of a GPX (or a plain 'lat,lon' text) file. Regex,
+   not DOMParser, so the same code runs under the offline test harness -
+   mirrors read_route_file() in map2model.py. */
+function parseGpx(text){
+  const out = [];
+  const re = /<(?:trkpt|rtept|wpt)\b[^>]*?\blat\s*=\s*"([-0-9.]+)"[^>]*?\blon\s*=\s*"([-0-9.]+)"|<(?:trkpt|rtept|wpt)\b[^>]*?\blon\s*=\s*"([-0-9.]+)"[^>]*?\blat\s*=\s*"([-0-9.]+)"/gi;
+  let m;
+  while((m = re.exec(String(text || '')))){
+    if(m[1] !== undefined) out.push([+m[1], +m[2]]);
+    else out.push([+m[4], +m[3]]);
+  }
+  if(!out.length)
+    for(const line of String(text || '').split(/[\n;]+/)){
+      const b = line.trim().split(',');
+      if(b.length === 2 && isFinite(+b[0]) && isFinite(+b[1]))
+        out.push([+b[0], +b[1]]);
+    }
+  return out;
+}
+
+/* Stitch Overpass way / relation elements into one ordered path: start from
+   the longest way, then keep appending whichever loose way touches an open
+   end. A closed circuit comes back as a single ring and skips the stitching. */
+function stitchOsmWays(elements){
+  const ways = [];
+  for(const el of elements || []){
+    if(el.type === 'way' && el.geometry)
+      ways.push(el.geometry.map(p => [p.lat, p.lon]));
+    else if(el.type === 'relation')
+      for(const mem of el.members || [])
+        if(mem.type === 'way' && mem.geometry)
+          ways.push(mem.geometry.map(p => [p.lat, p.lon]));
+  }
+  if(!ways.length) return [];
+  ways.sort((a, b) => b.length - a.length);
+  let path = ways.shift().slice();
+  const near = (p, q) => Math.abs(p[0] - q[0]) < 1e-6 && Math.abs(p[1] - q[1]) < 1e-6;
+  let moved = true;
+  while(ways.length && moved){
+    moved = false;
+    for(let i = 0; i < ways.length; i++){
+      for(const cand of [ways[i], ways[i].slice().reverse()]){
+        if(near(path[path.length - 1], cand[0])){
+          path = path.concat(cand.slice(1)); ways.splice(i, 1); moved = true; break;
+        }
+        if(near(path[0], cand[cand.length - 1])){
+          path = cand.slice(0, -1).concat(path); ways.splice(i, 1); moved = true; break;
+        }
+      }
+      if(moved) break;
+    }
+  }
+  return path;
+}
+
+function drawRouteLine(){
+  if(routeLine){ map.removeLayer(routeLine); routeLine = null; }
+  if(mode === 'route' && routePts.length >= 2)
+    routeLine = L.polyline(routePts,
+      {color:'#C12E1F', weight:3, opacity:.9}).addTo(map);
+}
+
+/* Centre the square tile on the path, sized to enclose it with a margin. The
+   tile stays SQUARE (the frame and cube cover depend on it) even though the
+   route's own bounds are usually a long thin rectangle. */
+function fitToRoute(){
+  if(routePts.length < 2) return;
+  let s = 90, n = -90, w = 180, e = -180;
+  for(const [la, lo] of routePts){
+    s = Math.min(s, la); n = Math.max(n, la);
+    w = Math.min(w, lo); e = Math.max(e, lo);
+  }
+  const cLat = (s + n) / 2, cLng = (w + e) / 2;
+  const mLat = (n - s) * 111320;
+  const mLng = (e - w) * 111320 * Math.cos(cLat * Math.PI / 180);
+  const side = Math.max(mLat, mLng) * 1.15;
+  centre = {lat:cLat, lng:cLng};
+  spanM = Math.min(MAXSPAN, Math.max(400, Math.round(side / 50) * 50));
+  $('span').value = spanM;
+  placeRect(true);
+}
+
+/* One path in, from any of the three sources. `name` is set only by the OSM
+   lookup, and switches the copied command from coordinates to --route-name. */
+function setRoute(pts, name){
+  routePts = (pts || []).slice();
+  routeName = name || '';
+  // Simplify ONCE here, not on every sync() - a Strava GPX is thousands of
+  // points and buildCmd() runs on every slider tick.
+  routeCmd = routeName ? [] : simplifyRoute(routePts, ROUTE_CMD_CAP);
+  drawRouteLine();
+  fitToRoute();
+  if(!routePts.length){ $('routeStat').textContent = 'No path yet.'; }
+  else if(routeName){
+    $('routeStat').textContent =
+      '\u201c' + routeName + '\u201d \u2014 ' + routePts.length +
+      ' points from OpenStreetMap.';
+  } else {
+    $('routeStat').textContent =
+      routePts.length + ' points (' + routeCmd.length + ' in the copied command).';
+  }
+  if(cache) previewStale('The path changed, so the preview is out of date.');
+  sync(); repaint();
+}
+
+async function routeLookup(){
+  const q = $('routeQ').value.trim();
+  if(!q) return;
+  $('routeFind').textContent = '\u2026';
+  const name = q.replace(/["\\]/g, '');
+  const oq = '[out:json][timeout:25];('
+    + 'way["name"="' + name + '"]["highway"="raceway"];'
+    + 'relation["name"="' + name + '"]["highway"="raceway"];'
+    + 'way["name"="' + name + '"][highway];'
+    + 'relation["name"="' + name + '"][route];);out geom;';
+  try{
+    const r = await fetch('https://overpass-api.de/api/interpreter',
+      {method:'POST', body:'data=' + encodeURIComponent(oq)});
+    const j = await r.json();
+    const path = stitchOsmWays(j.elements);
+    if(path.length >= 2) setRoute(path, q);
+    else $('routeStat').textContent =
+      'OpenStreetMap has nothing named \u201c' + q + '\u201d. Check the '
+      + 'spelling, or draw the path on the map.';
+  }catch(e){
+    $('routeStat').textContent =
+      'The lookup could not connect. Try again, or draw the path on the map.';
+  }
+  $('routeFind').textContent = 'Look up';
+}
+$('routeFind').addEventListener('click', routeLookup);
+$('routeQ').addEventListener('keydown', e=>{
+  if(e.key === 'Enter'){ e.preventDefault(); routeLookup(); } });
+
+$('routeGpx').addEventListener('change', ev=>{
+  const f = ev.target.files && ev.target.files[0];
+  if(!f) return;
+  const rd = new FileReader();
+  rd.onload = ()=>{
+    const pts = parseGpx(rd.result);
+    if(pts.length >= 2) setRoute(pts, '');
+    else $('routeStat').textContent = 'No track points in that file.';
+  };
+  rd.readAsText(f);
+});
+
+$('routeDraw').addEventListener('click', ()=>{
+  routeDrawing = !routeDrawing;
+  $('routeDraw').classList.toggle('on', routeDrawing);
+  $('routeDraw').textContent = routeDrawing ? 'Done' : 'Draw';
+  $('map').style.cursor = routeDrawing ? 'crosshair' : '';
+  $('routeHint').textContent = routeDrawing
+    ? 'Click along the road to lay the path. Click Done when you are finished.'
+    : 'Name a circuit, load a ride file, or draw the path on the map.';
+  if(!routeDrawing && routePts.length >= 2) setRoute(routePts, '');
+});
+$('routeClear').addEventListener('click', ()=>{
+  routePts = []; routeCmd = []; routeName = '';
+  drawRouteLine();
+  $('routeStat').textContent = 'No path yet.';
+  if(cache) previewStale('The path was cleared, so the preview is out of date.');
+  sync();
+});
+map.on('click', e=>{
+  if(!routeDrawing) return;
+  routePts.push([e.latlng.lat, e.latlng.lng]);
+  routeName = '';
+  routeCmd = simplifyRoute(routePts, ROUTE_CMD_CAP);   // small while drawing
+  drawRouteLine();
+  $('routeStat').textContent =
+    routePts.length + (routePts.length === 1 ? ' point so far.' : ' points so far.');
+});
+$('routeWidth').addEventListener('input', ()=>{
+  $('vRouteWidth').textContent = routeWidthM() + ' m'; });
+$('routeWidth').addEventListener('change', ()=>{
+  sync(); repaint();
+  if(cache) previewStale('The path width changed, so the preview is out of date.'); });
 $('modes').querySelectorAll('button').forEach(b=>
   b.addEventListener('click', ()=>{
     if(b.disabled) return;
@@ -971,12 +1233,23 @@ function buildCmd(){
   if(mode==='terrain'){
     a.push('--mode terrain', `--terrain-bands ${bandCount()}`);
     if(reliefMM()>0) a.push(`--terrain-relief-mm ${reliefMM()}`);
+  } else if(mode==='route'){
+    a.push('--mode route');
+    // A named circuit ships just the name and is re-resolved at build time -
+    // a drawn or uploaded path has to carry its coordinates, hard-simplified
+    // so the command still fits an Etsy personalisation field.
+    if(routeName) a.push(`--route-name "${routeName}"`);
+    else if(routeCmd.length>=2)
+      a.push(`--route "${routeStr(routeCmd,4)}"`);
+    if(routeWidthM()!==12) a.push(`--route-width-m ${routeWidthM()}`);
+    if(reliefMM()>0) a.push(`--terrain-relief-mm ${reliefMM()}`);
   } else {
     if(v.bscale!==1) a.push(`--building-scale ${v.bscale.toFixed(1)}`);
     if(!$('terrain').checked) a.push('--no-terrain');
   }
-  if(v.zex!==1 && mode!=='terrain') a.push(`--zexag ${v.zex.toFixed(1)}`);
-  ['water','greenery','roads','buildings'].forEach(k=>{ if(!on[k]) a.push('--no-'+k); });
+  if(v.zex!==1 && mode==='city') a.push(`--zexag ${v.zex.toFixed(1)}`);
+  (mode==='city' ? ['water','greenery','roads','buildings'] : ['water'])
+    .forEach(k=>{ if(!on[k]) a.push('--no-'+k); });
   if(DETAIL.source!=='overture') a.push('--source osm');
   if(DETAIL.lod!=='2')           a.push('--lod 1');
   a.push(`--roofs ${DETAIL.roofs}`);
@@ -1034,6 +1307,13 @@ function sync(){
     $('sizeNote').innerHTML = '<strong>Too large to print.</strong> Choose a smaller '
       + 'print size.';
     $('sizeNote').className = 'hint sizewarn';
+  } else if(mpmm > 8 && mode === 'route'){
+    // A circuit is a ribbon on relief, not a streetscape - there is no fine
+    // detail to lose, so this is a note, not a warning.
+    $('rWarn').innerHTML = '<span class="chip-ok">circuit scale</span>';
+    $('sizeNote').innerHTML = `A ${(spanM/1000).toFixed(1)} km circuit at 1:${ratio.toLocaleString()}.
+      The path is drawn at least ${Math.max(routeWidthM(), Math.ceil(lost)).toFixed(0)} m wide so it prints cleanly.`;
+    $('sizeNote').className = 'hint sizeok';
   } else if(mpmm > 8){
     $('rWarn').innerHTML = '<span class="chip-warn">too coarse — detail will be lost</span>';
     $('sizeNote').innerHTML = `<strong>This area is too big for the detail to survive.</strong>
@@ -1062,7 +1342,19 @@ function sync(){
     all:'Includes ridge roofs whose direction is guessed. Near-square buildings may point the wrong way.',
     none:'Every building gets a flat top.'}[DETAIL.roofs];
 
-  $('out-cmd').innerHTML = paint(buildCmd());
+  const cmd = buildCmd();
+  $('out-cmd').innerHTML = paint(cmd);
+
+  // The command is pasted into Etsy's personalisation field, which holds about
+  // 1024 characters. A named circuit is tiny; a long drawn path is not.
+  const rw = $('routeWarn');
+  if(mode === 'route' && !routeName && cmd.length > 1000){
+    rw.textContent = `This command is ${cmd.length} characters — Etsy's personalisation `
+      + `box holds about 1024. Name the circuit instead, or draw a simpler path.`;
+    rw.hidden = false;
+  } else if(rw){
+    rw.hidden = true;
+  }
 }
 
 /* ================= 3D preview ================= */
@@ -1503,7 +1795,8 @@ async function pingServer(){
 
 function exactParams(){
   const b = bboxOf(), v = S();
-  const terr = mode === 'terrain';
+  const terr = mode === 'terrain', route = mode === 'route';
+  const bare = terr || route;             // no city layers in either
   const p = {
     bbox: [b.w,b.s,b.e,b.n].map(n=>n.toFixed(6)).join(','),
     size: sizeMM, max_building_mm: sizeMM, shape: shape,
@@ -1511,9 +1804,9 @@ function exactParams(){
     zexag: v.zex, building_scale: v.bscale,
     terrain: $('terrain').checked ? 1 : 0,
     water: on.water?1:0,
-    greenery: terr?0:(on.greenery?1:0),
-    roads: terr?0:(on.roads?1:0),
-    buildings: terr?0:(on.buildings?1:0),
+    greenery: bare?0:(on.greenery?1:0),
+    roads: bare?0:(on.roads?1:0),
+    buildings: bare?0:(on.buildings?1:0),
     roofs: DETAIL.roofs, ridge: v.ridge,
     lod: DETAIL.lod, source: DETAIL.source,
     frame_width: v.fw, frame_depth: v.fd,
@@ -1524,6 +1817,17 @@ function exactParams(){
     p.terrain_bands = bandCount();
     if(reliefMM() > 0) p.terrain_relief_mm = reliefMM();
     // spell out the band filament picks so the preview matches the order
+    p.filaments = activeFilms().filter(f=>on[f.k])
+      .map(f=>`${f.k}=${pick[f.k]}`).join(',');
+  }
+  if(route){
+    // The preview builds exactly what the copied command builds: the same
+    // simplified path for a drawn / uploaded route, the same name for a
+    // looked-up one (the exporter re-resolves it from OSM).
+    if(routeName) p.route_name = routeName;
+    else p.route = routeStr(routeCmd, 4);
+    p.route_width_m = routeWidthM();
+    if(reliefMM() > 0) p.terrain_relief_mm = reliefMM();
     p.filaments = activeFilms().filter(f=>on[f.k])
       .map(f=>`${f.k}=${pick[f.k]}`).join(',');
   }
@@ -2471,9 +2775,9 @@ document.querySelectorAll('input,select').forEach(el=>{
 });
 
 DISCLAIMER_HTML = $('prevDisclaimer').innerHTML;
-// Deep-link the mode: the terrain listing on Etsy points at ?mode=terrain.
+// Deep-link the mode: each Etsy listing points at ?mode=terrain / ?mode=route.
 try{ const m = new URLSearchParams(location.search).get('mode');
-     if(m === 'terrain') setMode('terrain'); }catch(e){}
+     if(m === 'terrain' || m === 'route') setMode(m); }catch(e){}
 drawFilms();
 pingServer();
 placeRect(true);

@@ -79,10 +79,11 @@ const leafletMap = {
 };
 function layer() {
   const o = {
-    _bounds: null,
+    _bounds: null, _latlngs: null,
     addTo(m) { m.addLayer ? m.addLayer(o) : mapLayers.add(o); return o; },
     setBounds(b) { o._bounds = b; return o; },
     getBounds() { return o._bounds || [[0,0],[0,0]]; },
+    setLatLngs(p) { o._latlngs = p; return o; },
     setStyle() { return o; }, remove() { mapLayers.delete(o); },
   };
   return o;
@@ -92,6 +93,7 @@ const L = {
   tileLayer() { return layer(); },
   rectangle() { return layer(); },
   polygon() { return layer(); },
+  polyline() { return layer(); },
   circle() { return layer(); },
   marker() { return layer(); },
   latLng: latlng,
@@ -741,6 +743,87 @@ check('setMode terrain rewrites the command and the preview params', () => {
 
   G.setMode('city');                             // leave the fixture clean
   ok(!/--mode/.test(G.buildCmd()), 'setMode(city) did not undo terrain');
+});
+
+/* ---------------- route mode ---------------- */
+console.log('\nroute mode: a path instead of a city:');
+check('the route filament default mirrors the exporter', () => {
+  eq(G.DEFAULT_FILAMENTS.route, 'basic_red', 'console route default is not basic_red');
+  const py = fs.readFileSync(path.join(__dirname, 'map2model.py'), 'utf8');
+  const block = py.slice(py.indexOf('DEFAULT_FILAMENTS = {'));
+  const body = block.slice(0, block.indexOf('\n}'));
+  const m = body.match(/"route":\s*"([a-z0-9_]+)"/);
+  ok(m, 'no route default in map2model.py DEFAULT_FILAMENTS');
+  eq(G.DEFAULT_FILAMENTS.route, m[1], 'the console and exporter route colour disagree');
+  ok(G.FILAMENTS[G.DEFAULT_FILAMENTS.route], 'route colour is not a stocked filament');
+});
+check('parseGpx reads trkpt in either attribute order, and a plain list', () => {
+  eq(typeof G.parseGpx, 'function', 'parseGpx');
+  const gpx = '<gpx><trkseg>'
+    + '<trkpt lat="50.44" lon="5.97"></trkpt>'
+    + '<trkpt lon="5.98" lat="50.45"/>'
+    + '</trkseg></gpx>';
+  const a = G.parseGpx(gpx);
+  eq(a.length, 2, 'expected two points, got ' + a.length);
+  eq(a[0].join(','), '50.44,5.97', 'first trkpt wrong: ' + a[0]);
+  eq(a[1].join(','), '50.45,5.98', 'lon-first trkpt not handled: ' + a[1]);
+  const b = G.parseGpx('50.44,5.97\n50.45,5.98\n');
+  eq(b.length, 2, 'plain lat,lon list not parsed');
+  eq(G.parseGpx('').length, 0, 'empty input should give no points');
+});
+check('simplifyRoute caps the point count for the copied command', () => {
+  eq(typeof G.simplifyRoute, 'function', 'simplifyRoute');
+  const wig = [];
+  for (let i = 0; i < 400; i++)
+    wig.push([50.4 + i * 0.0005, 5.9 + (i % 2 ? 0.0004 : -0.0004)]);
+  const out = G.simplifyRoute(wig, 40);
+  ok(out.length <= 40, 'did not simplify to the cap: ' + out.length);
+  ok(out.length >= 2, 'simplified away the whole path');
+  eq(out[0].join(','), wig[0].join(','), 'the start point moved');
+});
+check('stitchOsmWays joins touching ways into one ordered path', () => {
+  eq(typeof G.stitchOsmWays, 'function', 'stitchOsmWays');
+  const els = [
+    { type: 'way', geometry: [{lat:0,lon:0},{lat:0,lon:1},{lat:0,lon:2}] },
+    { type: 'way', geometry: [{lat:0,lon:2},{lat:0,lon:3},{lat:0,lon:4}] },
+  ];
+  const p = G.stitchOsmWays(els);
+  eq(p.length, 5, 'ways were not stitched end to end: ' + JSON.stringify(p));
+  eq(p[4].join(','), '0,4', 'stitched path ends in the wrong place');
+  eq(G.stitchOsmWays([]).length, 0, 'empty element list should give no path');
+});
+check('setMode route rewrites the command and the preview params', () => {
+  G.setMode('route');
+  // a drawn path -> the command carries coordinates
+  document.getElementById('routeWidth').value = 12;
+  G.setRoute([[50.44, 5.97], [50.45, 5.98], [50.46, 5.99]], '');
+  let cmd = G.buildCmd();
+  ok(/--mode route(\s|$)/.test(cmd), '--mode route missing: ' + cmd);
+  ok(/--route "50\.\d+,5\.\d+;/.test(cmd), '--route coordinates missing: ' + cmd);
+  ok(!/--route-name/.test(cmd), 'a drawn path must not claim a name: ' + cmd);
+  ok(!/buildings=|greenery=|roads=/.test(cmd), 'route mode still ships city filaments: ' + cmd);
+  ok(/route=basic_red/.test(cmd), 'route filament not spelled out: ' + cmd);
+  let ep = G.exactParams();
+  ok(/(^|&)mode=route(&|$)/.test(ep), 'exactParams lost mode=route');
+  ok(/(^|&)route=50/.test(ep), 'exactParams lost the route coordinates');
+  ok(/(^|&)buildings=0(&|$)/.test(ep), 'route preview still asks for buildings');
+  // a named circuit -> the command ships just the name
+  G.setRoute([[50.44, 5.97], [50.45, 5.98]], 'Circuit de Spa-Francorchamps');
+  cmd = G.buildCmd();
+  ok(/--route-name "Circuit de Spa-Francorchamps"/.test(cmd), '--route-name missing: ' + cmd);
+  ok(!/--route "/.test(cmd), 'a named circuit must not also carry coordinates: ' + cmd);
+  ep = G.exactParams();
+  ok(/route_name=Circuit/.test(ep), 'exactParams lost route_name');
+
+  G.setMode('city');
+  G.setRoute([], '');
+  ok(!/--mode|--route/.test(G.buildCmd()), 'setMode(city) did not undo route');
+});
+check('the span slider opens up for a race circuit', () => {
+  G.setMode('route');
+  eq(String(document.getElementById('span').max), '8000', 'route mode did not widen the span slider');
+  G.setMode('city');
+  eq(String(document.getElementById('span').max), '3000', 'city mode did not restore the span slider');
 });
 
 /* ---------------- camera ---------------- */

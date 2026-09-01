@@ -313,6 +313,94 @@ check("bands default down the ramp and take a pick", _band_filaments_default_dow
 check("terrain bands are nested solids, taller and smaller going up", _bands_are_nested_solids)
 
 
+# ------------------------------------------------------------- route mode
+print("\nroute mode:")
+
+
+def _route_parses_forgivingly():
+    got = M.parse_route("50.40,5.90; 50.41,5.92 ;\n50.42,5.93;")
+    assert got == [(5.90, 50.40), (5.92, 50.41), (5.93, 50.42)], got
+    assert M.parse_route("") == []
+    for bad in ("nope", "1,2,3", "a,b"):
+        try:
+            M.parse_route(bad)
+        except ValueError:
+            pass
+        else:
+            assert False, f"parse_route({bad!r}) should have raised"
+
+
+def _route_file_reads_gpx_and_plain_text():
+    import tempfile
+    import os as _os
+    gpx = ('<?xml version="1.0"?><gpx><trk><trkseg>'
+           '<trkpt lat="50.40" lon="5.90"></trkpt>'
+           '<trkpt lon="5.92" lat="50.41"/>'
+           '</trkseg></trk></gpx>')
+    d = tempfile.mkdtemp()
+    gp = _os.path.join(d, "ride.gpx")
+    open(gp, "w").write(gpx)
+    assert M.read_route_file(gp) == [(5.90, 50.40), (5.92, 50.41)]
+    tp = _os.path.join(d, "ride.txt")
+    open(tp, "w").write("50.40,5.90\n50.41,5.92\n")
+    assert M.read_route_file(tp) == [(5.90, 50.40), (5.92, 50.41)]
+
+
+def _route_ribbon_drapes_and_is_watertight():
+    from shapely.geometry import box
+    proj = M.Projector((0.0, 0.0, 0.02, 0.02))          # ~2.2 km tile
+    M.terr_min[0] = 0.0
+    M.terr_relief_scale[0] = 1.0
+    bbox_poly = box(proj.minx, proj.miny, proj.maxx, proj.maxy)
+    span = proj.maxx - proj.minx
+    S = M.Scale(xy=200.0 / span, z=200.0 / span)
+    # a straight west-east path across the middle third of the tile
+    pts = [(0.010, 0.006 + 0.0004 * i) for i in range(21)]      # (lat, lon)
+    cfg = M.Config(bbox=(0.0, 0.0, 0.02, 0.02), mode="route",
+                   route=";".join(f"{a},{b}" for a, b in pts))
+    vf = M.build_route(cfg, proj, _Dome(proj, peak=250.0), S, bbox_poly)
+    assert vf is not None and len(vf[1]) > 0, "route ribbon is empty"
+    assert _open_edges(vf) == 0, "route ribbon is not watertight"
+    V = vf[0]
+    # stays inside the tile footprint (200 mm, centred on the origin)
+    assert V[:, 0].min() > -101 and V[:, 0].max() < 101, (V[:, 0].min(), V[:, 0].max())
+    # follows the dome: the top is far from flat
+    assert V[:, 2].max() - V[:, 2].min() > 3.0, "ribbon draped flat"
+    # a west-east ribbon is about route_width_m wide in Y
+    wide = (V[:, 1].max() - V[:, 1].min()) / S.xy
+    assert abs(wide - cfg.route_width_m) < cfg.route_width_m * 0.35, wide
+
+
+def _route_off_the_tile_is_rejected():
+    from shapely.geometry import box
+    proj = M.Projector((0.0, 0.0, 0.02, 0.02))
+    bbox_poly = box(proj.minx, proj.miny, proj.maxx, proj.maxy)
+    S = M.Scale(xy=1.0, z=1.0)
+    cfg = M.Config(bbox=(0.0, 0.0, 0.02, 0.02), mode="route",
+                   route="40.0,-70.0;40.1,-70.1")
+    try:
+        M.build_route(cfg, proj, _Dome(proj), S, bbox_poly)
+    except RuntimeError:
+        return
+    assert False, "a route that misses the tile should raise"
+
+
+def _route_layer_takes_a_filament():
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    assert M.filament_of(cfg, "route")[3] == "#C12E1F", "route lost its red default"
+    cfg2 = M.Config(bbox=(0, 0, 1, 1), filaments={"route": "basic_yellow"})
+    assert M.filament_of(cfg2, "route")[0] == "PLA Basic Yellow", "a route pick was ignored"
+    M.parse_filaments("route=basic_black")            # must not raise
+    assert "route" in M.PICKABLE
+
+
+check("parse_route is forgiving and rejects junk", _route_parses_forgivingly)
+check("read_route_file handles a .gpx track and a plain list", _route_file_reads_gpx_and_plain_text)
+check("the route ribbon drapes on the relief and is watertight", _route_ribbon_drapes_and_is_watertight)
+check("a route outside the tile is rejected", _route_off_the_tile_is_rejected)
+check("the route layer defaults red and takes a pick", _route_layer_takes_a_filament)
+
+
 def _picks_are_honoured():
     cfg = M.Config(bbox=(0, 0, 1, 1), filaments={"buildings": "basic_red"})
     assert M.filament_of(cfg, "buildings")[3] == "#C12E1F", "a pick was ignored"

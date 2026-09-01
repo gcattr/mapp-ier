@@ -13,7 +13,7 @@ files.
 | `serve.py` | Local HTTP server: serves the console AND runs the exporter behind it. |
 | `map2model-console.html` | The web console. Single file, no build step. |
 | `test_console.js` | Offline harness for the console: stubs the DOM, Leaflet and three.js and invokes every top-level function. `node test_console.js`. |
-| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 36 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
+| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 41 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
 | `verify_bambu.py` | Loads each plate shape through the Bambu Studio CLI, has it re-export, and reads the filaments and per-part extruders back out. Skips cleanly when Bambu Studio is not installed. See **Verifying it**. |
 | `bambu_p1s_0.4.json` | A P1S 0.4 nozzle project config that Bambu Studio itself wrote (v02.05.00.66). `_project_settings()` widens its per-slot lists and writes our filaments in. Version-coupled — see **Known gaps**. |
 | `landmarks.json` | Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it **silently** when it is absent — so if it goes missing the CN Tower renders as straight prisms in preview *and* export, with no warning anywhere. It is tracked in git for exactly that reason. |
@@ -508,11 +508,11 @@ grid would foul the shaped frame.
 
 ## Terrain mode
 
-`--mode city | terrain` (`Config.mode`, default `city`). The console shows it
-as a **What to make** control — City / Terrain / Route (Route is a disabled
-stub for phase 4). `?mode=terrain` in the URL preselects it, which is how the
-terrain Etsy listing will deep-link. `serve.py`'s `cfg_from` reads `mode`,
-`terrain_bands`, `terrain_relief_mm`.
+`--mode city | terrain | route` (`Config.mode`, default `city`). The console
+shows it as a **What to make** control — City / Terrain / Route. `?mode=terrain`
+and `?mode=route` in the URL preselect it, which is how each Etsy listing
+deep-links. `serve.py`'s `cfg_from` reads `mode`, `terrain_bands`,
+`terrain_relief_mm`, `route`, `route_name`, `route_width_m`, `route_height_mm`.
 
 `--mode terrain` drops buildings, roads and greenery (`run()` forces the
 `want_*` flags off) — a relief map is the land and the water. It **keeps** the
@@ -544,7 +544,64 @@ deliberately **not** in `DEFAULT_FILAMENTS` (the console mirror-checks it) and
 tile rises 5 m or 900 m. It scales real relief so the highest sample lands at
 N mm, via the module global `terr_relief_scale` (set in `run()` next to
 `terr_min`; `build_drape` and `build_terrain_bands` both read it, and it stays
-`1.0` for the city).
+`1.0` for the city). Route mode uses the same slider — a rider wants to see
+Eau Rouge.
+
+## Route mode
+
+`--mode route` lays a raised ribbon along a GPS track, draped on the relief —
+a Strava ride, or a named circuit like Spa-Francorchamps. Like terrain mode it
+forces `want_buildings/roads/greenery` off and keeps the shaped frame + cube
+cover; the split plate is **terrain + route** (2 filaments), water on the frame
+plate, cover on its own. The `route` layer defaults to `basic_red` (a stock
+key, in `DEFAULT_FILAMENTS`, mirrored in the console).
+
+**The path arrives three ways**, and the transport matters because the copied
+command is pasted into Etsy's ~1024-char personalisation field:
+
+- `--route-name "Circuit de Spa-Francorchamps"` — resolved via Overpass at
+  build time (`fetch_route_osm()`), so the command stays a name, not a
+  coordinate blob. Queries `highway=raceway` ways/relations by exact name,
+  then any named `highway`/`route`; stitches touching ways into one ordered
+  path (a closed circuit comes back as one ring). This is the headline case.
+- `--route "lat,lon;lat,lon;..."` — an explicit polyline. The console
+  RDP-simplifies a drawn or uploaded path to ≤ 40 points at 4 dp before
+  writing it here, and warns if the command still tops 1000 chars.
+- `--route-file PATH` — a `.gpx` track (regex, not an XML parser — `<trkpt>`
+  in either attribute order) or a plain `lat,lon`-per-line file. For a seller
+  running an order by hand.
+
+**No `--bbox`/`--center`?** In route mode `main()` resolves the path first and
+fits a **square** tile to it (+15 % margin) — the console's `fitToRoute()` does
+the same for the buyer. The `--bbox`/`--center` group is no longer
+argparse-`required`; `main()` enforces "one of bbox / center / a route" itself.
+`main()` stashes the resolved points on `cfg._route_pts` so `run()` doesn't hit
+Overpass twice.
+
+**`build_route()`** projects the line, clips it to `bbox_poly` (a route that
+misses the tile is a hard error), **densifies** the centreline to ~grid
+spacing — earcut adds no interior vertices, so an un-densified 200 m straight
+drapes as one flat plank over Eau Rouge — then `_chop_line`s it into
+tile/12-sized pieces so `build_drape`'s bbox-based grid split stays cheap, and
+buffers each piece to `route_width_m`. Overlapping draped slabs at the joins
+are fine; roads already behave that way and `finalize()` checks each is
+watertight alone.
+
+**The span slider opens to 8 km in route mode** (`MAXSPAN`) — a full F1 circuit
+is ~7 km corner to corner. At that scale the "too coarse" warning is replaced
+by a neutral "circuit scale" note: a ribbon on relief has no fine detail to
+lose, and `--min-feature` keeps the path printably wide.
+
+**Strava OAuth is not wired.** It needs the shop to register an API app and
+deploy a fixed redirect URL, which can't be done or tested from here. GPX
+export from Strava covers the same ground with no setup, so the console points
+at the file upload instead.
+
+**Blank-tile guard.** `run()`'s "never write a blank tile" check (lines
+~3147+) now also passes when route mode has a resolved path, or terrain mode
+has real relief (`not terr.flat`) — otherwise a hillside circuit with no water
+in frame, or a dry terrain tile, would be refused. Each mode gets its own
+error message.
 
 ## The cover
 
@@ -772,7 +829,7 @@ What it covers is everything *after* geometry: which filament each layer gets,
 what lands in the 3MF, and whether a slicer can read it back.
 
 ```bash
-python test_export.py                   # 36 checks, exit 0 = clean
+python test_export.py                   # 41 checks, exit 0 = clean
 ```
 
 Every check in it is a bug that shipped. The cover one in particular: the cover
@@ -802,7 +859,7 @@ a call to a function that no longer exists passes cleanly. This bit twice
 `test_console.js` is that harness. No dependencies, no network, no browser:
 
 ```bash
-node test_console.js                    # 52 checks, exit 0 = clean
+node test_console.js                    # 58 checks, exit 0 = clean
 node test_console.js old-console.html   # point it at an older copy
 ```
 
@@ -844,7 +901,7 @@ something instead of asserting against itself.
   line in `buildCmd()`; left for a session that can re-run a Toronto tile and
   eyeball the export.
 - **macOS pass, 2026-09-01.** Node 26.8.1 installed via Homebrew, so
-  `node test_console.js` runs here → 52/52; `python3 test_export.py` → 36/36.
+  `node test_console.js` runs here → 58/58; `python3 test_export.py` → 41/41.
   `verify_bambu.py` put all three plate shapes through the real Bambu Studio CLI
   on macOS and passed (re-run after the frame/cover signature change), and its
   `find_bambu()` was widened to cover `Bambu Studio.app` (with a space),
@@ -857,6 +914,16 @@ something instead of asserting against itself.
   the parallel-fetch path has had a live exercise; a bare-CLI invocation still
   has not. `verify_bambu.py` has **not** been re-run on a hex/circle or a
   terrain-band plate.
+- **Route mode, phase 4.** A real `--mode route --route "..."` CLI build ran
+  end to end near Eau Rouge: watertight ribbon, draped on the relief (13 mm of
+  climb across the tile), cube cover, `terrain`+`route` on the main plate.
+  `verify_bambu.py` PASSed on that route plate (terrain → slot 1, route →
+  slot 2). `--route-file` (`.gpx`) and a `serve.py` route preview also built
+  ("preview ready: 6 objects"). **Not** verified live: `--route-name` /
+  `fetch_route_osm()` — every Overpass endpoint was 504ing the day this went in,
+  so the query is only exercised by the `stitchOsmWays` unit test. Also
+  untested: the console's draw-on-map click flow and GPX file input in a real
+  browser (both are unit-tested via `parseGpx` / `stitchOsmWays`).
 - **A preview is still slow, just no longer additive.** The six Overture scans
   now run at once (see **Fetching**), so a build costs the slowest query rather
   than the sum — a 1.6 km London tile was 11m15s end to end, of which 4m10s was

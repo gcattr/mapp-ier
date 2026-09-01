@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import urllib.parse
 import urllib.request
 import math
@@ -183,6 +184,7 @@ DEFAULT_FILAMENTS = {
     "buildings": "basic_gray",
     "water":     "matte_marine_blue",
     "frame":     "basic_black",
+    "route":     "basic_red",
     "cover":     "petg_cover",
 }
 
@@ -202,7 +204,7 @@ def _band_index(layer):
     return 0
 
 # Buyer-pickable layers, in the order the console shows them.
-PICKABLE = ("terrain", "greenery", "roads", "buildings", "water", "frame")
+PICKABLE = ("terrain", "greenery", "roads", "buildings", "route", "water", "frame")
 
 
 def filament_of(cfg, layer):
@@ -257,13 +259,25 @@ class Config:
     bbox: tuple = (-79.400, 43.636, -79.370, 43.655)   # minlon, minlat, maxlon, maxlat
 
     # what the tile is
-    mode: str = "city"           # city | terrain. terrain drops buildings /
-                                 # roads / greenery and cuts the relief into
-                                 # elevation colour bands.
+    mode: str = "city"           # city | terrain | route. terrain and route
+                                 # both drop buildings / roads / greenery.
+                                 # terrain cuts the relief into elevation
+                                 # colour bands; route lays a raised ribbon
+                                 # along a GPS track, draped on the terrain.
     terrain_bands: int = 1       # 1 = smooth single-colour relief; 2..5 = that
                                  # many stepped elevation bands, each its own
                                  # filament (see TERRAIN_RAMP). Band 5 spills
                                  # to its own plate.
+    # --mode route. The path arrives one of three ways; route_name keeps the
+    # Etsy command short by resolving the geometry at build time instead of
+    # baking hundreds of coordinates into a string a human has to paste.
+    route: str = ""              # 'lat,lon;lat,lon;...' in order (drawn on the
+                                 # console map, or a simplified GPX)
+    route_name: str = ""         # OSM name to resolve instead, e.g.
+                                 # 'Circuit de Spa-Francorchamps'
+    route_file: str = ""         # file of 'lat,lon' lines, or a .gpx track
+    route_width_m: float = 12.0  # ribbon width on the ground
+    route_height_mm: float = 1.6  # how far the ribbon stands proud of the land
     # print size
     size_mm: float = 150.0        # longest horizontal dimension of the finished print
     tile_shape: str = "square"    # square | hex | circle. The vector layers clip
@@ -798,6 +812,108 @@ def fetch_osm(cfg):
                         wkb=poly.wkb))
     stage("buildings fetched (osm)", len(out))
     return out
+
+
+def parse_route(spec):
+    """'lat,lon;lat,lon;...' -> [(lon, lat), ...] in shapely x,y order.
+
+    Tolerant of whitespace, newlines (a pasted list) and a trailing ';'. An
+    empty spec is an empty list, not an error - the caller decides whether a
+    route was required.
+    """
+    out = []
+    for chunk in (spec or "").replace("\n", ";").split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        bits = chunk.split(",")
+        if len(bits) != 2:
+            raise ValueError(f"--route: expected 'lat,lon', got {chunk!r}")
+        try:
+            lat, lon = float(bits[0]), float(bits[1])
+        except ValueError:
+            raise ValueError(f"--route: expected 'lat,lon', got {chunk!r}")
+        out.append((lon, lat))
+    return out
+
+
+def read_route_file(path):
+    """A .gpx track, or a plain text file of 'lat,lon' lines -> [(lon, lat)]."""
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    looks_xml = path.lower().endswith(".gpx") or (
+        "<" in text and re.search(r"<(?:trkpt|rtept|wpt)\b", text, re.I))
+    if looks_xml:
+        # <trkpt lat="50.4" lon="5.9"> - trk / route / waypoint, either order
+        pts = []
+        for m in re.finditer(r"<(?:trkpt|rtept|wpt)\b[^>]*>", text, re.I):
+            tag = m.group(0)
+            la = re.search(r'lat\s*=\s*"([-0-9.]+)"', tag)
+            lo = re.search(r'lon\s*=\s*"([-0-9.]+)"', tag)
+            if la and lo:
+                pts.append((float(lo.group(1)), float(la.group(1))))
+        if not pts:
+            raise ValueError(f"{path}: no <trkpt>/<rtept>/<wpt> points found")
+        return pts
+    return parse_route(text)
+
+
+def fetch_route_osm(name, overpass_url=OVERPASS, timeout=60):
+    """Resolve an OSM feature name to an ordered [(lon, lat), ...] path.
+
+    Built for named circuits - `highway=raceway` ways and relations - but any
+    named way or route relation resolves, so a famous climb or a canal towpath
+    works too. Keeps the Etsy command to a name instead of a coordinate blob:
+    the geometry is fetched here, at build time.
+    """
+    safe = name.replace('"', '').replace("\\", "")
+    q = (f"[out:json][timeout:{int(timeout)}];"
+         f'('
+         f'  way["name"="{safe}"]["highway"="raceway"];'
+         f'  relation["name"="{safe}"]["highway"="raceway"];'
+         f'  way["name"="{safe}"][highway];'
+         f'  relation["name"="{safe}"][route];'
+         f');'
+         f"out geom;")
+    req = urllib.request.Request(
+        overpass_url, data=("data=" + urllib.parse.quote(q)).encode(),
+        headers={"User-Agent": f"map2model/{__version__}"})
+    with urllib.request.urlopen(req, timeout=timeout + 30) as r:
+        data = json.loads(r.read().decode())
+
+    ways = []          # each a list of (lon, lat)
+    for el in data.get("elements", []):
+        if el.get("type") == "way" and el.get("geometry"):
+            ways.append([(p["lon"], p["lat"]) for p in el["geometry"]])
+        elif el.get("type") == "relation":
+            for mem in el.get("members", []) or []:
+                if mem.get("type") == "way" and mem.get("geometry"):
+                    ways.append([(p["lon"], p["lat"]) for p in mem["geometry"]])
+    if not ways:
+        raise RuntimeError(
+            f"OSM has no feature named {name!r}. Check the spelling against "
+            f"openstreetmap.org, or draw the path on the map instead.")
+
+    # Stitch the ways into one path: start from the longest, then repeatedly
+    # append whichever loose way touches either open end. A closed loop (a
+    # racing circuit) comes back as one ring and skips the stitching.
+    def d2(a, b):
+        return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
+    ways.sort(key=len, reverse=True)
+    path = list(ways.pop(0))
+    changed = True
+    while ways and changed:
+        changed = False
+        for i, w in enumerate(ways):
+            for cand in (w, w[::-1]):
+                if d2(path[-1], cand[0]) < 1e-8:
+                    path.extend(cand[1:]); ways.pop(i); changed = True; break
+                if d2(path[0], cand[-1]) < 1e-8:
+                    path[:0] = cand[:-1]; ways.pop(i); changed = True; break
+            if changed:
+                break
+    return path
 
 
 def fetch_all(cfg):
@@ -1957,6 +2073,94 @@ def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
     return out
 
 
+def _densify(line, step):
+    """Add points along `line` so no gap is longer than `step`. earcut adds no
+    interior vertices, so a ribbon only follows the ground as finely as its
+    OWN edge is sampled - a 200 m straight buffered from two points drapes as
+    one flat plank over Eau Rouge. Sampling the centreline every ~step makes
+    the ribbon boundary that fine too."""
+    from shapely.geometry import LineString
+    xy = list(line.coords)
+    out = [xy[0]]
+    for a, b in zip(xy[:-1], xy[1:]):
+        d = ((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+        k = max(1, int(d // step))
+        for i in range(1, k):
+            t = i / k
+            out.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+        out.append(b)
+    return LineString(out)
+
+
+def _chop_line(line, step):
+    """Split a LineString into sub-lines about `step` long. build_drape
+    grid-splits a polygon over its *bounding box*, so one ribbon spanning the
+    tile pays an nx*ny cell scan to find mostly-empty cells. Buffering short
+    pieces keeps every bbox small and the drape cost tracks route length, not
+    tile area. Overlapping draped slabs at the joins are fine - that is how
+    roads already behave at junctions, and finalize() checks each is
+    watertight on its own."""
+    from shapely.geometry import LineString
+    xy = list(line.coords)
+    out, cur, run = [], [xy[0]], 0.0
+    for a, b in zip(xy[:-1], xy[1:]):
+        seg = ((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+        run += seg
+        cur.append(b)
+        if run >= step:
+            out.append(LineString(cur))
+            cur, run = [b], 0.0
+    if len(cur) >= 2:
+        out.append(LineString(cur))
+    return out or [line]
+
+
+def build_route(cfg, proj, terr, S, bbox_poly):
+    """A raised ribbon that follows a GPS track, draped on the terrain.
+
+    The path (cfg.route / cfg.route_name / cfg.route_file, resolved in run())
+    is projected, clipped to the tile, buffered to cfg.route_width_m and
+    draped like a wide road - so it climbs Eau Rouge and drops down the
+    Kemmel straight with the ground, which is the whole point of a circuit.
+    """
+    from shapely.geometry import LineString
+    pts = getattr(cfg, "_route_pts", None) or parse_route(cfg.route)
+    if len(pts) < 2:
+        raise RuntimeError("--mode route needs a path of at least two points "
+                           "(--route, --route-name or --route-file)")
+    line = proj.geom(LineString(pts))
+    try:
+        line = line.intersection(bbox_poly)
+    except Exception:
+        pass
+    segs = ([line] if line.geom_type == "LineString"
+            else [g for g in getattr(line, "geoms", [])
+                  if g.geom_type == "LineString"])
+    segs = [s for s in segs if s.length > 1e-6]
+    if not segs:
+        raise RuntimeError("the route does not cross the tile. Move or widen "
+                           "the tile so it covers the path.")
+    half = max(cfg.route_width_m, 0.5) / 2.0
+    span = proj.maxx - proj.minx
+    fine = max(12.0, span / 400.0)          # centreline sample ~ the mesh grid
+    chunk = max(120.0, span / 12.0)         # drape piece size
+    ribbons = []
+    for s in segs:
+        for piece in _chop_line(_densify(s, fine), chunk):
+            rib = piece.buffer(half, cap_style=1, join_style=1)
+            if rib.geom_type == "Polygon" and not rib.is_empty:
+                ribbons.append(rib)
+            else:
+                ribbons.extend(g for g in getattr(rib, "geoms", [])
+                               if g.geom_type == "Polygon" and not g.is_empty)
+    total_m = sum(s.length for s in segs)
+    log(cfg, f"[route] {len(pts)} points, {total_m / 1000:.2f} km on the tile, "
+             f"{cfg.route_width_m:.0f} m wide")
+    return build_drape(cfg, proj, terr, S, ribbons,
+                       cfg.route_height_mm, cfg.embed_mm,
+                       label="draping route")
+
+
 def _shift_vf(vf, dx):
     if vf is None:
         return None
@@ -2887,10 +3091,30 @@ def run(cfg, out_path):
           file=sys.stderr)
     print(f"  writing to {os.path.dirname(os.path.abspath(out_path))}",
           file=sys.stderr)
-    if cfg.mode == "terrain":
-        # A relief map is the land and the water. The city layers only get in
-        # the way of reading the contours.
+    if cfg.mode in ("terrain", "route"):
+        # A relief map, or a circuit on the relief, is the land and the water.
+        # The city layers only get in the way of reading it.
         cfg.want_buildings = cfg.want_roads = cfg.want_greenery = False
+    if cfg.mode == "route":
+        # Resolve the path now - from a name (OSM), a file, or the inline
+        # string - so the blank-tile guard below can see it and so a bad name
+        # fails before the S3 scans, not after. main() may have resolved it
+        # already to fit the bbox; reuse that rather than hit Overpass twice.
+        pts = getattr(cfg, "_route_pts", None)
+        if not pts:
+            if cfg.route_name:
+                with Stage("resolve route (Overpass)", cfg.verbose):
+                    pts = fetch_route_osm(cfg.route_name, cfg.overpass_url,
+                                          cfg.osm_timeout)
+            elif cfg.route_file:
+                pts = read_route_file(cfg.route_file)
+            else:
+                pts = parse_route(cfg.route)
+        if len(pts) < 2:
+            raise RuntimeError(
+                "--mode route needs a path: --route-name \"...\", "
+                "--route-file PATH, or --route \"lat,lon;lat,lon;...\"")
+        cfg._route_pts = pts
     terr_relief_scale[0] = 1.0
     proj = Projector(cfg.bbox)
     span_x = proj.maxx - proj.minx
@@ -2927,8 +3151,9 @@ def run(cfg, out_path):
         _samp = terr.elev_xy(GX, GY)
         terr_min[0] = float(np.min(_samp))
         # "tallest point = N mm": scale real relief so the highest sample lands
-        # at terrain_relief_mm. Terrain mode only; the city path stays 1.0.
-        if cfg.mode == "terrain" and cfg.terrain_relief_mm > 0:
+        # at terrain_relief_mm. terrain and route modes; the city path stays
+        # 1.0 (a skyline needs true ground under it).
+        if cfg.mode in ("terrain", "route") and cfg.terrain_relief_mm > 0:
             span_m = float(np.max(_samp)) - terr_min[0]
             if span_m > 1e-6:
                 terr_relief_scale[0] = (cfg.terrain_relief_mm / S.z) / span_m
@@ -2945,7 +3170,16 @@ def run(cfg, out_path):
     # - a plate a customer could actually be sent. Stop here instead, and say
     # which it was, because the two need opposite responses: retry versus move
     # the tile.
-    if not (buildings or roads or green or water):
+    #
+    # terrain and route modes have their own content: real relief for terrain,
+    # the drawn path for route. Only block those when even that is missing - a
+    # flat DEM (terrarium fetch failed, or genuinely open ocean) for terrain,
+    # or a path that turned out empty for route.
+    have_vectors = bool(buildings or roads or green or water)
+    route_ok = (cfg.mode == "route"
+                and len(getattr(cfg, "_route_pts", []) or []) >= 2)
+    terrain_ok = cfg.mode == "terrain" and not terr.flat
+    if not (have_vectors or route_ok or terrain_ok):
         if FETCH_ERRORS:
             detail = "; ".join(f"{w}: {m.splitlines()[0][:160]}"
                                for w, m in FETCH_ERRORS)
@@ -2953,6 +3187,13 @@ def run(cfg, out_path):
                 "every data query failed, so there is nothing to build. This is "
                 "a fetch problem, not an empty tile - try again in a minute. "
                 + detail)
+        if cfg.mode == "terrain":
+            raise RuntimeError(
+                "no elevation data for this tile, so a relief model would be a "
+                "flat slab. The terrain server may be down - try again shortly.")
+        if cfg.mode == "route":
+            raise RuntimeError(
+                "no route path - pass --route-name, --route-file or --route.")
         raise RuntimeError(
             "this tile has no buildings, roads, greenery or water in Overture, "
             "so there is nothing to build but bare ground. Move the tile over "
@@ -3103,9 +3344,11 @@ def run(cfg, out_path):
         # bands clip to bbox_poly themselves, so this works for hex/circle too.
         with Stage("mesh terrain bands", cfg.verbose):
             raw.extend(build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_p))
-    elif cfg.water_in_frame:
+    elif cfg.water_in_frame or cfg.mode == "route":
         # The land plinth is the tile MINUS the water, cut clean through, so
         # the water surface printed into the frame shows from underneath.
+        # Route mode always builds this plinth - it is what the ribbon drapes
+        # onto - whether or not water rides the frame.
         with Stage("mesh terrain (water cut out)", cfg.verbose):
             land = bbox_poly
             if water_p:
@@ -3144,6 +3387,9 @@ def run(cfg, out_path):
     with Stage("mesh buildings", cfg.verbose):
         raw.append(("buildings", None if not cfg.want_buildings else
                     build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly)))
+    if cfg.mode == "route":
+        with Stage("mesh route", cfg.verbose):
+            raw.append(("route", build_route(cfg, proj, terr, S, bbox_poly)))
     # The tile outline in mm, centred on the origin: what the frame and cover
     # offset. A square tile_poly gives box(-W/2,-H/2,W/2,H/2), so the frame
     # and cover come out identical to the old W/H rectangle maths.
@@ -3175,13 +3421,14 @@ def run(cfg, out_path):
         if cfg.split:
             # One AMS = 4 filaments per plate. In the city that is exactly
             # terrain + roads + greenery + buildings; in terrain mode it is
-            # elevation bands 1-4. A 5th band spills to its own plate. Water
-            # and frame share a plate; the cover is on its own.
+            # elevation bands 1-4; in route mode it is terrain + route. A 5th
+            # band spills to its own plate. Water and frame share a plate; the
+            # cover is on its own.
             import os as _os
             stem, ext = _os.path.splitext(out_path)
             ext = ext or ".3mf"
             model_order = ["terrain", "terrain_2", "terrain_3", "terrain_4",
-                           "terrain_5", "roads", "greenery", "buildings"]
+                           "terrain_5", "route", "roads", "greenery", "buildings"]
             have = {n for n, vf in layers if vf is not None}
             present = [n for n in model_order if n in have]
             main, spill = present[:4], present[4:]
@@ -3321,7 +3568,7 @@ def main():
 
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    g = ap.add_mutually_exclusive_group(required=True)
+    g = ap.add_mutually_exclusive_group(required=False)
     g.add_argument("--bbox", nargs=4, type=float,
                    metavar=("MINLON", "MINLAT", "MAXLON", "MAXLAT"))
     g.add_argument("--center", nargs=2, type=float, metavar=("LAT", "LON"))
@@ -3329,17 +3576,35 @@ def main():
                     help="half-width in metres when using --center")
     ap.add_argument("-o", "--out", default="city.3mf")
     ap.add_argument("--size", type=float, default=150.0, help="print size in mm")
-    ap.add_argument("--mode", default="city", choices=["city", "terrain"],
+    ap.add_argument("--mode", default="city", choices=["city", "terrain", "route"],
                     help="city (default) = buildings, roads, greenery. terrain "
                          "= relief and water only, optionally cut into "
-                         "elevation colour bands (--terrain-bands).")
+                         "elevation colour bands (--terrain-bands). route = a "
+                         "raised ribbon along a GPS track, draped on the "
+                         "relief (--route-name / --route-file / --route).")
     ap.add_argument("--terrain-bands", type=int, default=1,
                     help="--mode terrain: cut the relief into this many stepped "
                          "elevation bands, each its own filament (1 = smooth "
                          "single colour; max 5, the 5th on its own plate)")
     ap.add_argument("--terrain-relief-mm", type=float, default=0.0,
-                    help="--mode terrain: scale the relief so the tallest point "
-                         "is this many mm (0 = true scale)")
+                    help="--mode terrain/route: scale the relief so the tallest "
+                         "point is this many mm (0 = true scale)")
+    ap.add_argument("--route", default="",
+                    help="--mode route: the path as 'lat,lon;lat,lon;...' in "
+                         "order (what the console writes for a drawn or "
+                         "uploaded track)")
+    ap.add_argument("--route-name", default="",
+                    help="--mode route: an OSM feature name to resolve to a "
+                         "path instead, e.g. 'Circuit de Spa-Francorchamps' - "
+                         "keeps the command short, geometry fetched at build")
+    ap.add_argument("--route-file", default="",
+                    help="--mode route: a .gpx track, or a text file of "
+                         "'lat,lon' lines")
+    ap.add_argument("--route-width-m", type=float, default=12.0,
+                    help="--mode route: ribbon width on the ground (default 12)")
+    ap.add_argument("--route-height-mm", type=float, default=1.6,
+                    help="--mode route: how far the ribbon stands proud of the "
+                         "land (default 1.6)")
     ap.add_argument("--tile-shape", default="square",
                     choices=["square", "hex", "circle"],
                     help="outline the tile is cut to (default square). hex is "
@@ -3508,17 +3773,43 @@ def main():
                   + (f"   default for {', '.join(dflt)}" if dflt else ""))
         return
 
-    if a.bbox:
+    route_pts = None
+    if a.mode == "route" and not a.bbox and not a.center:
+        # No tile given: fit the square to the path. The console does this for
+        # the buyer; a hand-run --route-file / --route-name needs it too.
+        if a.route_name:
+            route_pts = fetch_route_osm(a.route_name, a.overpass_url, a.osm_timeout)
+        elif a.route_file:
+            route_pts = read_route_file(a.route_file)
+        elif a.route:
+            route_pts = parse_route(a.route)
+        else:
+            ap.error("--mode route needs --route-name, --route-file or --route "
+                     "(or pass --bbox / --center yourself)")
+        lons = [p[0] for p in route_pts]
+        lats = [p[1] for p in route_pts]
+        cx, cy = (min(lons) + max(lons)) / 2.0, (min(lats) + max(lats)) / 2.0
+        half = max((max(lons) - min(lons)) * 111320.0 * math.cos(math.radians(cy)),
+                   (max(lats) - min(lats)) * 111320.0) / 2.0 * 1.15
+        half = max(half, 200.0)
+        dlat = half / 111320.0
+        dlon = half / (111320.0 * math.cos(math.radians(cy)))
+        bbox = (cx - dlon, cy - dlat, cx + dlon, cy + dlat)
+    elif a.bbox:
         bbox = tuple(a.bbox)
-    else:
+    elif a.center:
         lat, lon = a.center
         dlat = a.radius / 111320.0
         dlon = a.radius / (111320.0 * math.cos(math.radians(lat)))
         bbox = (lon - dlon, lat - dlat, lon + dlon, lat + dlat)
+    else:
+        ap.error("one of the arguments --bbox --center is required")
 
     cfg = Config(bbox=bbox, size_mm=a.size, tile_shape=a.tile_shape,
                  mode=a.mode, terrain_bands=a.terrain_bands,
                  terrain_relief_mm=a.terrain_relief_mm,
+                 route=a.route, route_name=a.route_name, route_file=a.route_file,
+                 route_width_m=a.route_width_m, route_height_mm=a.route_height_mm,
                  z_exaggeration=a.zexag,
                  terrain=not a.no_terrain, use_building_parts=not a.no_parts,
                  roof_shapes=not a.no_roofs,
@@ -3561,6 +3852,8 @@ def main():
                  floating_max_aspect=a.floating_aspect,
                  fetch_workers=a.fetch_workers,
                  terrain_zoom=a.terrain_zoom, terrain_grid=a.terrain_grid)
+    if route_pts is not None:
+        cfg._route_pts = route_pts        # already resolved to fit the bbox
     run(cfg, a.out)
 
 
