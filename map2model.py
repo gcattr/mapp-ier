@@ -237,6 +237,11 @@ class Config:
 
     # print size
     size_mm: float = 150.0        # longest horizontal dimension of the finished print
+    tile_shape: str = "square"    # square | hex | circle. The vector layers clip
+                                  # to it for free (clean_polys already intersects
+                                  # bbox_poly); the frame and cover offset the
+                                  # outline. hex is flat-top, circle inscribes the
+                                  # square drag.
     z_exaggeration: float = 1.0   # 1.0 = true scale. 1.3-1.8 makes small towns read better
     base_mm: float = 3.0          # solid plinth under the terrain
     max_building_mm: float = 0.0  # clamp tallest building (0 = no clamp)
@@ -1820,13 +1825,72 @@ def build_flat(cfg, proj, S, polys, z0, z1):
     return acc.result()
 
 
-def build_box(cfg, W, H, model_top_mm):
+def prism_any(poly, z0, z1):
+    """prism() over a Polygon or every part of a MultiPolygon / collection."""
+    from shapely.geometry import Polygon
+    if poly is None or poly.is_empty:
+        return None
+    geoms = [poly] if isinstance(poly, Polygon) else list(getattr(poly, "geoms", []))
+    acc = MeshAccum()
+    for g in geoms:
+        if isinstance(g, Polygon) and not g.is_empty and g.area > 1e-9:
+            acc.add(prism(g, z0, z1, None))
+    return acc.result()
+
+
+def _shift_vf(vf, dx):
+    if vf is None:
+        return None
+    V, F = vf
+    V = np.array(V, dtype=np.float64, copy=True)
+    V[:, 0] += dx
+    return V, F
+
+
+# Buffer joins: mitre so a square outline offsets to a square and a hexagon
+# keeps its corners; the limit is generous because a 120 deg hex corner needs
+# more mitre than a 90 deg one.
+_J = dict(join_style=2, mitre_limit=8.0)
+
+
+def _buf(poly, dist):
+    """poly.buffer(dist) with the mitre join, tolerant of an empty result."""
+    p = poly.buffer(dist, **_J)
+    return p if (not p.is_empty and p.is_valid) else poly
+
+
+def _cover_posts(shape, cfg, reach):
+    """Small columns over the frame border that carry the cover ceiling.
+
+    One at each outline vertex (4 for a square, 6 for a hex), 12 spaced round
+    a circle. Every post is clipped to the border ring, so it can never sit
+    over the model - same guarantee the old rectangular corner posts had.
+    """
+    from shapely.geometry import box as _box
+    from shapely.ops import unary_union
+    c, fw = cfg.frame_clearance_mm, cfg.frame_width_mm
+    border = _buf(shape, c + fw).difference(_buf(shape, c))
+    ring = _buf(shape, c + fw * 0.5).exterior
+    pts = list(ring.coords[:-1])
+    if len(pts) > 10:                                    # circle: sample evenly
+        n = 12
+        pts = [ring.interpolate(i / n, normalized=True).coords[0] for i in range(n)]
+    size = max(min(reach, fw - cfg.box_clearance_mm), 1.5)
+    posts = [_box(x - size, y - size, x + size, y + size).intersection(border)
+             for x, y in pts]
+    posts = [p for p in posts if not p.is_empty]
+    return unary_union(posts) if posts else border
+
+
+def build_box(cfg, shape, model_top_mm):
     """
     Two half-covers that slide on from opposite ends and meet in the middle.
+    `shape` is the tile outline in mm, centred on the origin; every ring below
+    is that outline buffered outward, so a square outline reproduces the old
+    rectangular cover to the millimetre and a hex or circle follows its edge.
 
     Each half is a shell closed on three sides, with the retaining groove
-    running along ALL of them - both long walls and the end wall. Cross-section
-    through any closed side:
+    running along ALL of them. Cross-section through any closed side:
 
             |                     wall
             |__                   rib   ) frame rim rides
@@ -1834,8 +1898,7 @@ def build_box(cfg, W, H, model_top_mm):
             |__                   lip   )
 
     Slide the two halves together, tape the seam, and the framed model is
-    boxed on every face with only the slip fit to move in. Sized as the inner
-    box of a double-box pack, so the walls carry real load.
+    boxed on every face with only the slip fit to move in.
     """
     from shapely.geometry import box as _box
 
@@ -1844,14 +1907,12 @@ def build_box(cfg, W, H, model_top_mm):
     lip_reach = cfg.cover_lip_mm
     lip_t = cfg.cover_lip_thickness_mm
 
-    frame_w = W + 2 * cfg.frame_clearance_mm + 2 * cfg.frame_width_mm
-    frame_h = H + 2 * cfg.frame_clearance_mm + 2 * cfg.frame_width_mm
+    frame_outer = _buf(shape, cfg.frame_clearance_mm + cfg.frame_width_mm)
     frame_tall = cfg.frame_floor_mm + cfg.frame_depth_mm
 
-    clear_x = frame_w + 2 * clr
-    clear_y = frame_h + 2 * clr
-    out_x = clear_x + 2 * wall            # both ends closed now
-    out_y = clear_y + 2 * wall
+    clear = _buf(frame_outer, clr)            # air gap around the frame
+    inner = clear                            # cover cavity
+    outer = _buf(clear, wall)                # cover outer wall
 
     groove_lo = lip_t
     groove_hi = lip_t + frame_tall + 2 * clr
@@ -1862,13 +1923,17 @@ def build_box(cfg, W, H, model_top_mm):
     top_z = lip_t + clear_z
     total_z = top_z + wall
 
-    # A cube cover. The model footprint is square and its height is capped
-    # (the console passes --max-building-mm), so without this a flat tile ships
-    # as a stubby lid with a fistful of dead air above it inside a cube
-    # shipping box. Raise the cover to a cube - never shrink it, a taller model
-    # keeps its taller cover - so every tile fills its box the same way.
-    # Clamped to the build volume; the walls and ceiling rise, the groove and
-    # rib stay pinned to the frame.
+    minx, miny, maxx, maxy = outer.bounds
+    out_x, out_y = maxx - minx, maxy - miny
+    cx = (minx + maxx) / 2.0
+    pad = max(out_x, out_y) + 2.0
+
+    # A cube cover. The model footprint is capped (the console passes
+    # --max-building-mm), so without this a flat tile ships as a stubby lid
+    # with a fistful of dead air above it inside a cube shipping box. Raise
+    # the cover to a cube - never shrink it, a taller model keeps its taller
+    # cover - clamped to the build volume; the walls and ceiling rise, the
+    # groove and rib stay pinned to the frame.
     if cfg.box_cube:
         cube = min(max(out_x, out_y), cfg.build_volume_mm)
         if cube > total_z:
@@ -1876,60 +1941,52 @@ def build_box(cfg, W, H, model_top_mm):
             top_z = total_z - wall
             clear_z = top_z - lip_t
 
-    def half(sign, dx):
-        """One shell: closed on its end and both long sides, open at the seam."""
-        x_out_lo = dx - out_x / 2 if sign < 0 else dx
-        x_out_hi = dx if sign < 0 else dx + out_x / 2
-        outer = _box(x_out_lo, -out_y / 2, x_out_hi, out_y / 2)
+    def ring_at(reach):
+        """The groove/wall ring `reach` wide on the three closed sides, open
+        along the seam so the halves can slide together. `band` is only as
+        wide as one wall - just enough to clear the seam face where the ring
+        crosses it (top and bottom edges); the old rectangular cover tapered
+        the groove to nothing there instead."""
+        band = wall
+        cav = _buf(clear, -reach)
+        seam = clear.intersection(_box(cx - band, miny - pad, cx + band, maxy + pad))
+        return outer.difference(cav.union(seam))
 
-        def cavity(inset):
-            lo = x_out_lo + wall + inset if sign < 0 else x_out_lo
-            hi = x_out_hi if sign < 0 else x_out_hi - wall - inset
-            return _box(lo, -clear_y / 2 + inset, hi, clear_y / 2 - inset)
+    lip_ring = ring_at(lip_reach)
+    wall_ring = ring_at(0.0)
+    rib_ring = ring_at(rib_reach)
+    posts = _cover_posts(shape, cfg, rib_reach)
 
-        inner = cavity(0.0)
-
-        # Corner posts. The groove fixes the cover's height, but a knock on the
-        # box face can still bow the ceiling DOWN in the middle - which is
-        # precisely where a mast tip is. These columns stand on the frame's
-        # border and carry the ceiling, so it cannot reach the model however
-        # hard the outer box is hit. They sit over the border, never the model.
-        post = min(rib_reach, cfg.frame_width_mm - clr)
-        cy_lo, cy_hi = -clear_y / 2, clear_y / 2
-        if sign < 0:
-            end_x = x_out_lo + wall
-            corners = [_box(end_x, cy_lo, end_x + post, cy_lo + post),
-                       _box(end_x, cy_hi - post, end_x + post, cy_hi)]
-        else:
-            end_x = x_out_hi - wall
-            corners = [_box(end_x - post, cy_lo, end_x, cy_lo + post),
-                       _box(end_x - post, cy_hi - post, end_x, cy_hi)]
-        posts = corners[0].union(corners[1])
-
+    def half(sign):
+        hp = (_box(minx - pad, miny - pad, cx, maxy + pad) if sign < 0
+              else _box(cx, miny - pad, maxx + pad, maxy + pad))
         acc = MeshAccum()
-        acc.add(prism(outer.difference(cavity(lip_reach)), 0.0, groove_lo, None))
-        acc.add(prism(outer.difference(inner), groove_lo, groove_hi, None))
-        acc.add(prism(outer.difference(cavity(rib_reach)), groove_hi, rib_hi, None))
-        acc.add(prism(outer.difference(inner).union(posts), rib_hi, top_z, None))
-        acc.add(prism(outer, top_z, total_z, None))
+        acc.add(prism_any(lip_ring.intersection(hp), 0.0, groove_lo))
+        acc.add(prism_any(wall_ring.intersection(hp), groove_lo, groove_hi))
+        acc.add(prism_any(rib_ring.intersection(hp), groove_hi, rib_hi))
+        acc.add(prism_any(wall_ring.union(posts).intersection(hp), rib_hi, top_z))
+        acc.add(prism_any(outer.intersection(hp), top_z, total_z))
         return acc.result()
 
-    # Sit the halves side by side so the plate stays inside the printer, rather
-    # than spread out where the pair alone would overflow it.
+    left = half(-1)                          # the x <= cx shell
+    right = half(+1)                         # the x >= cx shell
+
+    # Park the two halves side by side, clear of the model, so the plate stays
+    # inside the printer instead of spread out where the pair would overflow it.
     gap = 8.0
     hw = out_x / 2.0
-    x0 = W / 2.0 + 14.0
-    left = half(-1, x0 + hw)                # spans x0 .. x0+hw
-    right = half(+1, x0 + hw + gap)         # spans x0+hw+gap .. x0+2*hw+gap
+    P = maxx + 20.0
+    left = _shift_vf(left, P - minx)
+    right = _shift_vf(right, (P + hw + gap) - cx)
 
     if cfg.verbose:
-        print(f"  cover: two halves, each {out_x / 2:.1f} x {out_y:.1f} x "
+        kind = "cube" if cfg.box_cube else "box"
+        print(f"  cover: two halves, each {hw:.1f} x {out_y:.1f} x "
               f"{total_z:.1f} mm", file=sys.stderr)
-        print(f"         groove on all four sides: lip {lip_reach:.1f} mm under, "
+        print(f"         groove all round: lip {lip_reach:.1f} mm under, "
               f"rib {rib_reach:.1f} mm over, {wall:.1f} mm walls",
               file=sys.stderr)
-        shape = "cube" if cfg.box_cube else "box"
-        print(f"         closed {shape}: {out_x:.1f} x {out_y:.1f} x "
+        print(f"         closed {kind}: {out_x:.1f} x {out_y:.1f} x "
               f"{total_z:.1f} mm, {2 * clr:.2f} mm play in every direction",
               file=sys.stderr)
         air = top_z - lip_t - model_top_mm
@@ -1937,54 +1994,52 @@ def build_box(cfg, W, H, model_top_mm):
               f"(>= {cfg.box_headroom_mm:.1f} mm headroom); corner posts carry "
               f"the ceiling", file=sys.stderr)
         BV = cfg.build_volume_mm
-        if max(out_y, out_x / 2) > BV or total_z > BV:
+        if max(out_y, hw) > BV or total_z > BV:
             print(f"  [warn] the cover does not fit a {BV:.0f} mm build volume "
-                  f"({out_x / 2:.0f} x {out_y:.0f} x {total_z:.0f} mm per half)",
+                  f"({hw:.0f} x {out_y:.0f} x {total_z:.0f} mm per half)",
                   file=sys.stderr)
     return left, right
 
 
-def build_frame(cfg, W, H):
+def build_frame(cfg, shape):
     """
-    A tray the finished model drops into.
+    A tray the finished model drops into. `shape` is the tile outline in mm,
+    centred on the origin; the tray is that outline offset outward.
 
-        outer   = model + 2*clearance + 2*width
-        cavity  = model + 2*clearance, `depth` deep
-        floor   = `floor_mm` thick, optionally cut out to leave a `lip` ledge
+        cavity = shape + clearance          (the model drops in here)
+        outer  = shape + clearance + width
+        floor  = `floor_mm` thick, optionally cut back to a `lip` ledge
 
-    Print the model (terrain + roads + greenery + buildings = 4 filaments),
-    the water insert, and this frame separately, then assemble.
+    A square outline offsets to exactly the rectangle the old W/H math made,
+    so square tiles are unchanged; hex and circle follow their own edge.
     """
-    from shapely.geometry import box
+    from shapely.affinity import translate
     c = cfg.frame_clearance_mm
     fw = cfg.frame_width_mm
     d = cfg.frame_depth_mm
     t = max(cfg.frame_floor_mm, 0.0)
     lip = cfg.frame_lip_mm
 
-    iw, ih = W + 2 * c, H + 2 * c              # cavity
-    ow, oh = iw + 2 * fw, ih + 2 * fw          # outer
+    x0, _, x1, _ = shape.bounds
+    if not cfg.frame_inplace:
+        shape = translate(shape, xoff=(x1 - x0) + c + fw + 10.0)
 
-    dx = 0.0 if cfg.frame_inplace else (W + ow) / 2.0 + 10.0
-    def rect(w, h):
-        return box(dx - w / 2, -h / 2, dx + w / 2, h / 2)
+    cavity = _buf(shape, c)
+    outer = _buf(shape, c + fw)
 
     acc = MeshAccum()
-    outer = rect(ow, oh)
-    cavity = rect(iw, ih)
-
     floor_acc = MeshAccum()
     if t > 0:
-        if cfg.frame_open and lip > 0 and iw > 2 * lip and ih > 2 * lip:
-            floor = outer.difference(rect(iw - 2 * lip, ih - 2 * lip))
-        else:
-            floor = outer
+        floor = outer
+        if cfg.frame_open and lip > 0:
+            back = _buf(shape, c - lip)
+            if back.is_valid and not back.is_empty and back.area > 1.0:
+                floor = outer.difference(back)
         # In water-in-frame mode the floor is the WATER surface: a second
         # filament fused into the same print, which the cut-out land model is
         # glued on top of so the water shows through.
-        (floor_acc if cfg.water_in_frame else acc).add(prism(floor, 0.0, t, None))
-    walls = outer.difference(cavity)
-    acc.add(prism(walls, t, t + d, None))
+        (floor_acc if cfg.water_in_frame else acc).add(prism_any(floor, 0.0, t))
+    acc.add(prism_any(outer.difference(cavity), t, t + d))
     return acc.result(), floor_acc.result()
 
 
@@ -2316,6 +2371,34 @@ def scale_poly(poly, proj, S):
     cx = (proj.minx + proj.maxx) / 2
     cy = (proj.miny + proj.maxy) / 2
     return affine_transform(poly, [S.xy, 0, 0, S.xy, -cx * S.xy, -cy * S.xy])
+
+
+def tile_poly(cfg, proj):
+    """The tile outline in projected metres: the clip every layer is cut to.
+
+    square is the whole bbox. hex (flat-top) and circle are inscribed in the
+    shorter side and centred, so a not-quite-square drag still fits. Everything
+    downstream keys off this: clean_polys() intersects each layer with it, the
+    terrain plinth is built from it minus water, and the frame and cover offset
+    it.
+    """
+    from shapely.geometry import box, Point, Polygon
+    x0, y0, x1, y1 = proj.minx, proj.miny, proj.maxx, proj.maxy
+    shape = (cfg.tile_shape or "square").lower()
+    if shape == "square":
+        return box(x0, y0, x1, y1)
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    r = min(x1 - x0, y1 - y0) / 2.0
+    if shape == "circle":
+        return Point(cx, cy).buffer(r, 96)   # positional: quad_segs (2.x) / resolution (1.x)
+    if shape == "hex":
+        # flat-top: two vertices on the horizontal axis, spans 2r across
+        pts = [(cx + r * math.cos(math.radians(a)),
+                cy + r * math.sin(math.radians(a)))
+               for a in range(0, 360, 60)]
+        return Polygon(pts)
+    raise ValueError(f"unknown tile_shape {cfg.tile_shape!r} "
+                     "(square | hex | circle)")
 
 
 def finalize(vf, name=""):
@@ -2690,7 +2773,24 @@ def run(cfg, out_path):
 
     with Stage("load terrain", cfg.verbose):
         terr = Terrain(cfg, proj)
-        bbox_poly = box(proj.minx, proj.miny, proj.maxx, proj.maxy)
+        # The tile outline. square is the whole bbox; hex/circle inscribe it.
+        # Every layer clips to this (clean_polys intersects it), so a hex tile
+        # is a hex of city without another line of clipping code.
+        bbox_poly = tile_poly(cfg, proj)
+        if cfg.tile_shape != "square":
+            full = box(proj.minx, proj.miny, proj.maxx, proj.maxy).area
+            log(cfg, f"[shape] {cfg.tile_shape} tile, "
+                     f"{bbox_poly.area / full * 100:.0f}% of the bbox")
+            if not cfg.water_in_frame:
+                # The land plinth only follows a non-rectangular outline on the
+                # water-in-frame path (build_drape); the plain build_terrain
+                # grid stays rectangular, so its corners would foul the shaped
+                # frame and the model would not drop in. The console and the
+                # copied command always pass --water-in-frame.
+                print(f"[warn] --tile-shape {cfg.tile_shape} without "
+                      f"--water-in-frame: the terrain plinth stays rectangular "
+                      f"and will not fit the {cfg.tile_shape} frame. Add "
+                      f"--water-in-frame.", file=sys.stderr)
         gx = np.linspace(proj.minx, proj.maxx, 60)
         gy = np.linspace(proj.miny, proj.maxy, 60)
         GX, GY = np.meshgrid(gx, gy)
@@ -2899,13 +2999,13 @@ def run(cfg, out_path):
     with Stage("mesh buildings", cfg.verbose):
         raw.append(("buildings", None if not cfg.want_buildings else
                     build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly)))
+    # The tile outline in mm, centred on the origin: what the frame and cover
+    # offset. A square tile_poly gives box(-W/2,-H/2,W/2,H/2), so the frame
+    # and cover come out identical to the old W/H rectangle maths.
+    shape_mm = scale_poly(bbox_poly, proj, S)
     if cfg.frame:
         with Stage("mesh frame", cfg.verbose):
-            W = max(span_x, span_y) * S.xy
-            H = min(span_x, span_y) * S.xy
-            if span_x < span_y:
-                W, H = H, W
-            walls_vf, floor_vf = build_frame(cfg, W, H)
+            walls_vf, floor_vf = build_frame(cfg, shape_mm)
             raw.append(("frame", walls_vf))
             if cfg.water_in_frame and floor_vf is not None:
                 raw.append(("water", floor_vf))
@@ -2919,7 +3019,7 @@ def run(cfg, out_path):
                 V = vf[0]
                 if len(V):
                     top = max(top, float(np.max(V[:, 2])))
-            left_vf, right_vf = build_box(cfg, W, H, top)
+            left_vf, right_vf = build_box(cfg, shape_mm, top)
             raw.append(("cover_left", left_vf))
             raw.append(("cover_right", right_vf))
 
@@ -3020,8 +3120,9 @@ def run(cfg, out_path):
                   file=sys.stderr)
     if cfg.frame:
         c, fw, d = cfg.frame_clearance_mm, cfg.frame_width_mm, cfg.frame_depth_mm
-        print(f"\n  frame: outer {max(span_x,span_y)*S.xy + 2*c + 2*fw:.1f} x "
-              f"{min(span_x,span_y)*S.xy + 2*c + 2*fw:.1f} mm, "
+        fo = _buf(shape_mm, c + fw).bounds
+        print(f"\n  frame ({cfg.tile_shape}): outer {fo[2]-fo[0]:.1f} x "
+              f"{fo[3]-fo[1]:.1f} mm, "
               f"cavity {d:.1f} mm deep, {c:.2f} mm clearance per side",
               file=sys.stderr)
         if not cfg.frame_inplace and not cfg.split:
@@ -3076,6 +3177,11 @@ def main():
                     help="half-width in metres when using --center")
     ap.add_argument("-o", "--out", default="city.3mf")
     ap.add_argument("--size", type=float, default=150.0, help="print size in mm")
+    ap.add_argument("--tile-shape", default="square",
+                    choices=["square", "hex", "circle"],
+                    help="outline the tile is cut to (default square). hex is "
+                         "flat-top; circle inscribes the square drag. The frame "
+                         "and cover follow the shape.")
     ap.add_argument("--zexag", type=float, default=1.0)
     ap.add_argument("--no-terrain", action="store_true")
     ap.add_argument("--no-water", action="store_true", help="omit the water layer")
@@ -3247,7 +3353,8 @@ def main():
         dlon = a.radius / (111320.0 * math.cos(math.radians(lat)))
         bbox = (lon - dlon, lat - dlat, lon + dlon, lat + dlat)
 
-    cfg = Config(bbox=bbox, size_mm=a.size, z_exaggeration=a.zexag,
+    cfg = Config(bbox=bbox, size_mm=a.size, tile_shape=a.tile_shape,
+                 z_exaggeration=a.zexag,
                  terrain=not a.no_terrain, use_building_parts=not a.no_parts,
                  roof_shapes=not a.no_roofs,
                  roof_mode=("none" if a.no_roofs else a.roofs), overture_release=a.release,

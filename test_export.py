@@ -94,6 +94,11 @@ def _cover_is_petg():
 check("the cover is PETG, both halves of it", _cover_is_petg)
 
 
+def _square(side=200.0):
+    from shapely.geometry import box
+    return box(-side / 2, -side / 2, side / 2, side / 2)
+
+
 def _half_dims(left):
     """out_x, out_y, total_z of the assembled cover, read off one half.
 
@@ -111,7 +116,7 @@ def _cover_is_a_cube():
     # it to a cube so it still fills a cube shipping box.
     cfg = M.Config(bbox=(0, 0, 1, 1))
     assert cfg.box_cube, "box_cube should default on"
-    out_x, out_y, total_z = _half_dims(M.build_box(cfg, 200.0, 200.0, 10.0)[0])
+    out_x, out_y, total_z = _half_dims(M.build_box(cfg, _square(), 10.0)[0])
     cube = min(max(out_x, out_y), cfg.build_volume_mm)
     assert abs(total_z - cube) < 0.5, (out_x, out_y, total_z, cube)
     assert total_z <= cfg.build_volume_mm + 1e-6, total_z
@@ -120,22 +125,124 @@ def _cover_is_a_cube():
 def _cube_never_shrinks_a_tall_cover():
     # A 300 mm model already needs a cover taller than its footprint; the cube
     # rule must not pull it back down (it would clip the model).
-    cfg = M.Config(bbox=(0, 0, 1, 1))
     plain = _half_dims(M.build_box(M.Config(bbox=(0, 0, 1, 1), box_cube=False),
-                                   200.0, 200.0, 300.0)[0])[2]
-    cubed = _half_dims(M.build_box(cfg, 200.0, 200.0, 300.0)[0])[2]
+                                   _square(), 300.0)[0])[2]
+    cubed = _half_dims(M.build_box(M.Config(bbox=(0, 0, 1, 1)),
+                                   _square(), 300.0)[0])[2]
     assert abs(plain - cubed) < 0.5, (plain, cubed)
 
 
 def _no_box_cube_stays_short():
     cfg = M.Config(bbox=(0, 0, 1, 1), box_cube=False)
-    total_z = _half_dims(M.build_box(cfg, 200.0, 200.0, 10.0)[0])[2]
+    total_z = _half_dims(M.build_box(cfg, _square(), 10.0)[0])[2]
     assert total_z < 60, total_z          # lip + 10 + headroom + wall, no cube
 
 
 check("the cover grows to a cube for a flat model", _cover_is_a_cube)
 check("the cube rule never shrinks a tall cover", _cube_never_shrinks_a_tall_cover)
 check("--no-box-cube leaves the cover its natural height", _no_box_cube_stays_short)
+
+
+# ------------------------------------------------------------- tile shapes
+print("\ntile shapes:")
+
+
+class _Proj:
+    """Enough of Projector for tile_poly: a square metre-space bbox."""
+    def __init__(self, half=800.0):
+        self.minx = self.miny = -half
+        self.maxx = self.maxy = half
+
+
+def _open_edges(vf):
+    """Boundary edges in a (V, F) soup. 0 => every solid in it is closed."""
+    F = np.asarray(vf[1])
+    e = np.vstack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    e.sort(axis=1)
+    _, counts = np.unique(e, axis=0, return_counts=True)
+    return int((counts == 1).sum())
+
+
+def _tile_poly_shapes():
+    proj = _Proj(800.0)
+    sq = M.tile_poly(M.Config(bbox=(0, 0, 1, 1), tile_shape="square"), proj)
+    assert abs(sq.area - 1600.0 * 1600.0) < 1.0, sq.area
+    hexg = M.tile_poly(M.Config(bbox=(0, 0, 1, 1), tile_shape="hex"), proj)
+    assert len(hexg.exterior.coords) - 1 == 6, len(hexg.exterior.coords) - 1
+    # a flat-top hex inscribed in r=800: area = 3*sqrt(3)/2 * r^2
+    import math
+    assert abs(hexg.area - 3 * math.sqrt(3) / 2 * 800.0 ** 2) < 50.0, hexg.area
+    circ = M.tile_poly(M.Config(bbox=(0, 0, 1, 1), tile_shape="circle"), proj)
+    assert abs(circ.area - math.pi * 800.0 ** 2) / (math.pi * 800.0 ** 2) < 0.01
+    # every shape clips inside the bbox
+    for g in (hexg, circ):
+        assert g.difference(sq).area < 1.0, "shape spills past the bbox"
+
+
+def _square_shape_is_unchanged():
+    # box(-W/2..W/2) through the new buffer path must give the same frame and
+    # cover bounds the old W/H rectangle maths did.
+    from shapely.geometry import box
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    W = 200.0
+    c, fw = cfg.frame_clearance_mm, cfg.frame_width_mm
+    walls, _ = M.build_frame(cfg, box(-W / 2, -W / 2, W / 2, W / 2))
+    fx = walls[0][:, 0]
+    assert abs((fx.max() - fx.min()) - (W + 2 * c + 2 * fw)) < 0.05, \
+        (fx.max() - fx.min(), W + 2 * c + 2 * fw)
+    ox, oy, oz = _half_dims(M.build_box(cfg, box(-W / 2, -W / 2, W / 2, W / 2), 40.0)[0])
+    want = W + 2 * c + 2 * fw + 2 * cfg.box_clearance_mm + 2 * cfg.box_wall_mm
+    assert abs(ox - want) < 0.05 and abs(oy - want) < 0.05, (ox, oy, want)
+
+
+def _hex_and_circle_frames_are_closed():
+    from shapely.geometry import Point, Polygon
+    import math
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    hexg = Polygon([(100 * math.cos(math.radians(a)), 100 * math.sin(math.radians(a)))
+                    for a in range(0, 360, 60)])
+    circ = Point(0, 0).buffer(100.0, quad_segs=96)
+    for name, shp in (("hex", hexg), ("circle", circ)):
+        walls, _ = M.build_frame(cfg, shp)
+        assert walls is not None and len(walls[1]) > 0, name + " frame empty"
+        assert _open_edges(walls) == 0, name + " frame is not closed"
+        left, right = M.build_box(cfg, shp, 40.0)
+        for h in (left, right):
+            assert h is not None and len(h[1]) > 0, name + " cover half empty"
+            assert _open_edges(h) == 0, name + " cover half is not closed"
+
+
+def _cover_z_bands():
+    # _open_edges and bounds cannot see a collapsed or missing groove ring,
+    # and the cover is filtered out of the preview - so pin the vertical
+    # structure: exactly six z-planes, and wall geometry spanning every band.
+    from shapely.geometry import box
+    cfg = M.Config(bbox=(0, 0, 1, 1))
+    left, right = M.build_box(cfg, box(-100, -100, 100, 100), 40.0)
+    lip_t, clr, wall = cfg.cover_lip_thickness_mm, cfg.box_clearance_mm, cfg.box_wall_mm
+    frame_tall = cfg.frame_floor_mm + cfg.frame_depth_mm
+    groove_lo = lip_t
+    groove_hi = lip_t + frame_tall + 2 * clr
+    rib_hi = groove_hi + lip_t
+    total_z = _half_dims(left)[2]                 # the cube height
+    levels = [0.0, groove_lo, groove_hi, rib_hi, total_z - wall, total_z]
+    for h in (left, right):
+        z = h[0][:, 2]
+        zu = sorted({round(float(t), 3) for t in z})
+        assert len(zu) == 6, f"expected 6 z-planes, got {zu}"
+        for want in levels:
+            assert any(abs(u - want) < 0.05 for u in zu), \
+                f"z-plane {want:.2f} missing from {zu}"
+        for za, zb in zip(levels[:-1], levels[1:]):
+            spans = any(z[tri].min() <= za + 0.05 and z[tri].max() >= zb - 0.05
+                        for tri in h[1])
+            assert spans, f"no cover geometry spans z {za:.2f}..{zb:.2f}"
+
+
+check("tile_poly makes a square, a 6-gon and a circle inside the bbox", _tile_poly_shapes)
+check("a square outline still frames with the same outer envelope", _square_shape_is_unchanged)
+check("hex and circle frames and covers are watertight", _hex_and_circle_frames_are_closed)
+check("the cover keeps its six z-planes and every band has walls", _cover_z_bands)
 
 
 def _picks_are_honoured():

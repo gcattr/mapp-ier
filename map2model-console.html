@@ -397,14 +397,20 @@ pre .flag{color:#7FB2E5} pre .num{color:#E0B36A} pre .prog{color:#8ED9A4}
 
     <section>
       <h2>Tile</h2>
-      <div class="hint" id="areaHint">Drag a square tile on the map. Tiles are always
-        square so they seat in the frame.</div>
+      <div class="hint" id="areaHint">Drag a tile on the map. You draw a square;
+        the shape below is cut from inside it and the frame follows it.</div>
       <div class="row"><label class="t" for="cLat">Centre</label>
         <input type="number" id="cLat" step="0.0001" aria-label="Centre latitude">
         <input type="number" id="cLng" step="0.0001" aria-label="Centre longitude"></div>
       <div class="row"><label class="t" for="span">Tile width</label>
         <input type="range" id="span" min="400" max="3000" step="50" value="1600">
         <span class="val" id="vSpan">1600 m</span></div>
+      <div class="row"><label class="t">Shape</label>
+        <div class="seg" id="shapes" style="flex:1">
+          <button data-shape="square" class="on">Square</button>
+          <button data-shape="hex">Hexagon</button>
+          <button data-shape="circle">Circle</button>
+        </div></div>
       <div class="hint" id="sizeNote"></div>
       <div class="row"><label class="t" for="out">File name</label>
         <input type="text" id="out" placeholder="placeholder.3mf" style="width:150px"></div>
@@ -729,12 +735,54 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
 let rect = L.rectangle([[0,0],[0,0]],
   {color:'#16202B', weight:2, fillColor:'#2E6FB7', fillOpacity:.12}).addTo(map);
 
+/* What actually gets built: 'square' | 'hex' | 'circle'. The exporter clips
+   every layer to this and the frame follows it; here it is only a preview
+   outline drawn inside the square the buyer drags. */
+let shape = 'square';
+let shapeOverlay = null;
+
+/* Hex/circle inscribed in the tile's box, centred. bboxOf() already makes the
+   box square in metres, so scaling the unit circle by the lat/lng half-extents
+   draws a true circle / regular hex on the ground. Mirrors tile_poly() in
+   map2model.py: flat-top hex (first vertex on the +x axis), 96-gon circle. */
+function shapeLatLngs(){
+  const b = bboxOf();
+  const cy=(b.s+b.n)/2, cx=(b.w+b.e)/2;
+  const rLat=(b.n-b.s)/2, rLng=(b.e-b.w)/2;
+  const n = shape==='hex' ? 6 : 96;
+  const out=[];
+  for(let i=0;i<n;i++){
+    const a = i*2*Math.PI/n;
+    out.push([cy + rLat*Math.sin(a), cx + rLng*Math.cos(a)]);
+  }
+  return out;
+}
+function drawShapeOverlay(){
+  if(shapeOverlay){ map.removeLayer(shapeOverlay); shapeOverlay=null; }
+  rect.setStyle({opacity: shape==='square'?1:0.25, fillOpacity: shape==='square'?.12:.04});
+  if(shape==='square') return;
+  shapeOverlay = L.polygon(shapeLatLngs(),
+    {color:'#16202B', weight:2, fillColor:'#2E6FB7', fillOpacity:.12,
+     interactive:false}).addTo(map);
+}
+
+/* Set the tile shape and reflect it in the map and the shape buttons. The
+   copied command and the preview both read `shape` straight off this. */
+function setShape(s){
+  shape = (s === 'hex' || s === 'circle') ? s : 'square';
+  const seg = document.getElementById('shapes');
+  if(seg) seg.querySelectorAll('button').forEach(x =>
+    x.classList.toggle('on', x.dataset.shape === shape));
+  drawShapeOverlay();
+}
+
 function placeRect(fit){
   const b = bboxOf();
   rect.setBounds([[b.s,b.w],[b.n,b.e]]);
   if(fit) map.fitBounds(rect.getBounds(), {padding:[30,30]});
   $('cLat').value = centre.lat.toFixed(4);
   $('cLng').value = centre.lng.toFixed(4);
+  drawShapeOverlay();
   sync();
 }
 const tileChanged = ()=>{ if(cache) previewStale('The tile moved, so the preview is out of date.'); };
@@ -821,6 +869,12 @@ $('sizes').querySelectorAll('button').forEach(b=>
     $('sizes').querySelectorAll('button').forEach(x=>x.classList.remove('on'));
     b.classList.add('on'); sync(); repaint();
   }));
+$('shapes').querySelectorAll('button').forEach(b=>
+  b.addEventListener('click', ()=>{
+    setShape(b.dataset.shape);
+    if(cache) previewStale('The tile shape changed, so the preview is out of date.');
+    sync(); repaint();
+  }));
 const FRAME = {fw:6, fd:7, fc:0.3, ff:2};      // fixed: a fit that posts well
 const LAYER_MM = {greenery:0.8, roads:0.5, embed:0.35};  // matches the exporter
 const MIN_FEATURE_MM = 0.9;                             // matches --min-feature
@@ -847,6 +901,7 @@ function buildCmd(){
   const b=bboxOf(), v=S(), a=[];
   a.push(`--bbox ${b.w.toFixed(4)} ${b.s.toFixed(4)} ${b.e.toFixed(4)} ${b.n.toFixed(4)}`);
   a.push(`--size ${sizeMM}`);
+  if(shape!=='square') a.push(`--tile-shape ${shape}`);
   // Cap the model's height at its own footprint number. Building stretch can
   // otherwise push a skyline past the print size the buyer paid for, and the
   // cube cover would grow with it. 100/150/200 mm print, 100/150/200 mm tall.
@@ -889,10 +944,17 @@ function sync(){
   $('vZex').textContent    = v.zex.toFixed(1)+'×';
   $('vBscale').textContent = v.bscale.toFixed(1)+'×';
 
-  const mpmm = spanM/sizeMM, outer = sizeMM + 2*v.fc + 2*v.fw;
+  // A flat-top hexagon is sizeMM across but only sizeMM*sqrt(3)/2 tall; square
+  // and circle fill the sizeMM box. The buyer still drags a square, so the
+  // tile readout keeps saying "square".
+  const mh = shape==='hex' ? sizeMM*Math.sqrt(3)/2 : sizeMM;
+  const mpmm = spanM/sizeMM;
+  const fpad = 2*v.fc + 2*v.fw, outer = Math.max(sizeMM, mh) + fpad;
   $('rTile').textContent  = (spanM/1000).toFixed(2)+' km square';
-  $('rModel').textContent = sizeMM+' × '+sizeMM+' mm';
-  $('rFrame').textContent = outer.toFixed(0)+' × '+outer.toFixed(0)+' mm';
+  $('rModel').textContent = shape==='square'
+    ? sizeMM+' × '+sizeMM+' mm'
+    : `${sizeMM} × ${mh.toFixed(0)} mm ${shape}`;
+  $('rFrame').textContent = `${(sizeMM+fpad).toFixed(0)} × ${(mh+fpad).toFixed(0)} mm`;
   $('rScale').textContent = mpmm.toFixed(1)+' m/mm';
   // What the nozzle can resolve, put in terms a customer can act on: anything
   // narrower than the thinnest printable wall gets fattened to reach it.
@@ -1376,7 +1438,7 @@ function exactParams(){
   const b = bboxOf(), v = S();
   return new URLSearchParams({
     bbox: [b.w,b.s,b.e,b.n].map(n=>n.toFixed(6)).join(','),
-    size: sizeMM, max_building_mm: sizeMM,
+    size: sizeMM, max_building_mm: sizeMM, shape: shape,
     zexag: v.zex, building_scale: v.bscale,
     terrain: $('terrain').checked ? 1 : 0,
     water: on.water?1:0, greenery: on.greenery?1:0,
@@ -1508,7 +1570,8 @@ function buildExactScene(layers){
     $('sizeNote').className = 'hint sizewarn';
   }
   $('prevHud').innerHTML = `${shownObjs} objects<br>`
-    + `${tris.toLocaleString()} triangles<br>${sizeMM} × ${sizeMM} mm<br>`
+    + `${tris.toLocaleString()} triangles<br>`
+    + `${(x1-x0).toFixed(0)} × ${(y1-y0).toFixed(0)} mm<br>`
     + `tallest ${tallest.toFixed(1)} mm`
     + (coverH ? `<br>cover ${coverH.toFixed(0)} mm tall` : '');
   $('prevLegend').innerHTML = mono

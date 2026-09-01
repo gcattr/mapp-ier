@@ -85,6 +85,7 @@ def cfg_from(q):
         bbox=tuple(bbox),
         size_mm=num("size", 200.0),
         max_building_mm=num("max_building_mm", 0.0),
+        tile_shape=q.get("shape", ["square"])[0],
         z_exaggeration=num("zexag", 1.0),
         building_scale=num("building_scale", 1.0),
         terrain=flag("terrain", True),

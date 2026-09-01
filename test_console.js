@@ -91,6 +91,8 @@ const L = {
   map() { return leafletMap; },
   tileLayer() { return layer(); },
   rectangle() { return layer(); },
+  polygon() { return layer(); },
+  circle() { return layer(); },
   marker() { return layer(); },
   latLng: latlng,
   // the zoom control is added by hand so it does not land on the search box
@@ -672,6 +674,36 @@ check('the command caps building height at the print size', () => {
   ok(size, 'no --size in the command: ' + cmd);
   ok(new RegExp('--max-building-mm ' + size + '(\\s|$)').test(cmd),
      '--max-building-mm is missing or does not match --size: ' + cmd);
+});
+
+/* ---------------- tile shapes ---------------- */
+console.log('\nthe tile can be a hexagon or a circle:');
+check('setShape drives the copied command and the preview params', () => {
+  eq(typeof G.setShape, 'function', 'setShape');
+
+  G.setShape('square');
+  ok(!/--tile-shape/.test(G.buildCmd()), 'square must not spell out a shape');
+  ok(/(^|&)shape=square(&|$)/.test(G.exactParams()), 'exactParams lost shape=square');
+
+  G.setShape('hex');
+  ok(/--tile-shape hex(\s|$)/.test(G.buildCmd()), 'hex missing from the command');
+  ok(/(^|&)shape=hex(&|$)/.test(G.exactParams()), 'exactParams lost shape=hex');
+
+  G.setShape('circle');
+  ok(/--tile-shape circle(\s|$)/.test(G.buildCmd()), 'circle missing from the command');
+
+  G.setShape('nonsense');                        // anything unknown falls back
+  ok(!/--tile-shape/.test(G.buildCmd()), 'an unknown shape must fall back to square');
+
+  G.setShape('square');                          // leave the fixture clean
+});
+check('the shape outline has the right corner count', () => {
+  eq(typeof G.shapeLatLngs, 'function', 'shapeLatLngs');
+  G.setShape('hex');
+  eq(G.shapeLatLngs().length, 6, 'a hexagon needs six points');
+  G.setShape('circle');
+  ok(G.shapeLatLngs().length >= 48, 'a circle needs many points: ' + G.shapeLatLngs().length);
+  G.setShape('square');
 });
 
 /* ---------------- camera ---------------- */

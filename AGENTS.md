@@ -13,7 +13,7 @@ files.
 | `serve.py` | Local HTTP server: serves the console AND runs the exporter behind it. |
 | `map2model-console.html` | The web console. Single file, no build step. |
 | `test_console.js` | Offline harness for the console: stubs the DOM, Leaflet and three.js and invokes every top-level function. `node test_console.js`. |
-| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 29 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
+| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 32 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
 | `verify_bambu.py` | Loads each plate shape through the Bambu Studio CLI, has it re-export, and reads the filaments and per-part extruders back out. Skips cleanly when Bambu Studio is not installed. See **Verifying it**. |
 | `bambu_p1s_0.4.json` | A P1S 0.4 nozzle project config that Bambu Studio itself wrote (v02.05.00.66). `_project_settings()` widens its per-slot lists and writes our filaments in. Version-coupled — see **Known gaps**. |
 | `landmarks.json` | Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it **silently** when it is absent — so if it goes missing the CN Tower renders as straight prisms in preview *and* export, with no warning anywhere. It is tracked in git for exactly that reason. |
@@ -461,13 +461,59 @@ Resolution: aim under 8 m/mm. `--min-feature 0.9` widens anything thinner so it
 prints, which is why a 2 m mast comes out proportionally fat on a coarse tile.
 The console shows this as a 1:N ratio with a warning past the threshold.
 
+## Tile shapes
+
+`--tile-shape square | hex | circle` (`Config.tile_shape`, default `square`).
+The console shows it as a Shape segmented control in the Tile panel; the buyer
+still drags a **square** on the map and the hex or circle is inscribed in it,
+centred, on the shorter side. A 4th Etsy-listing angle later, but it works now.
+
+It hangs off **one** polygon. `tile_poly(cfg, proj)` returns the outline in
+projected metres — the whole bbox for `square`, a flat-top hexagon or a 96-gon
+circle for the others — and that polygon *is* `bbox_poly`. Everything already
+clips to `bbox_poly`: `clean_polys()` intersects every building, road, greenery
+and water feature with it, and the land plinth is `bbox_poly.difference(water)`
+run through `build_drape()`, which triangulates an arbitrary polygon. So a hex
+tile is a hex of city with no extra clipping code. (The rectangular-grid
+`build_terrain()` in the non-`water_in_frame` path is *not* shape-aware, but the
+console and the copied command both use `water_in_frame`, which takes the
+`build_drape` path.)
+
+The frame and cover follow the outline. `build_frame(cfg, shape)` and
+`build_box(cfg, shape, top)` take the mm-space outline (`scale_poly(bbox_poly,
+proj, S)`) instead of `W, H` and offset it with `shape.buffer(dist,
+join_style=2)` — mitre joins, so a square outline gives the **same outer
+envelope** as the old rectangle (`test_export.py` pins the frame width and the
+cover's `out_x`/`out_y`) and hex/circle keep their own edge. The internals are
+*not* byte-identical to the old cover: `build_box` splits the offset rings at
+`x = centre` with a half-plane instead of building two `box`es, the corner
+posts move to the outline's vertices (6 for a hex, 12 round a circle) clipped
+to the frame border, and the groove now stops one wall-thickness short of the
+seam on the two edges it crosses (`ring_at`'s `band`) where the old cover
+tapered it to nothing. The seam is taped, so that gap doesn't matter.
+`test_export.py`'s "six z-planes, every band has walls" check pins the vertical
+structure `_open_edges` can't see. `prism_any()` wraps `prism()` to survive a
+`MultiPolygon` out of a boolean op.
+
+For a hex the cube cover comes out ~cuboid — `out_x` (220) is the vertex span,
+`out_y` (190) the flat span, `total_z` follows the longer one. Circle and
+square covers are true cubes. Not yet padded to a true cube for hex; flagged.
+
+Two side effects of `bbox_poly` no longer being the whole bbox: `tile_area`
+in `to_green_polys()` is now the hex/circle area, so the `green_blanket_scale`
+(25×) ratio is met a little more readily on shaped tiles; and
+`build_terrain()` (non-`water_in_frame` only) is not shape-aware, so a bare CLI
+`--tile-shape hex` without `--water-in-frame` prints a `[warn]` — the terrain
+grid would foul the shaped frame.
+
 ## The cover
 
 Two half-shells, each closed on three sides, with a retaining groove along all
 of them: a lip under the frame rim and a rib over it, so the rim is captured
-with only the 0.4 mm slip fit to move in. Four corner posts carry the ceiling so
-a knock can't press it onto a spire. Defaults: 3.0 mm walls, 2.4 mm lip/rib,
-6.0 mm reach, 10.0 mm headroom.
+with only the 0.4 mm slip fit to move in. Corner posts carry the ceiling so a
+knock can't press it onto a spire — four for a square, one per vertex for a
+hex, twelve round a circle (see **Tile shapes**). Defaults: 3.0 mm walls,
+2.4 mm lip/rib, 6.0 mm reach, 10.0 mm headroom.
 
 **It's a cube** unless `--no-box-cube`. The walls and ceiling rise to make the
 closed cover as tall as it is wide (clamped to `build_volume_mm`); the groove
@@ -686,7 +732,7 @@ What it covers is everything *after* geometry: which filament each layer gets,
 what lands in the 3MF, and whether a slicer can read it back.
 
 ```bash
-python test_export.py                   # 29 checks, exit 0 = clean
+python test_export.py                   # 32 checks, exit 0 = clean
 ```
 
 Every check in it is a bug that shipped. The cover one in particular: the cover
@@ -716,7 +762,7 @@ a call to a function that no longer exists passes cleanly. This bit twice
 `test_console.js` is that harness. No dependencies, no network, no browser:
 
 ```bash
-node test_console.js                    # 48 checks, exit 0 = clean
+node test_console.js                    # 50 checks, exit 0 = clean
 node test_console.js old-console.html   # point it at an older copy
 ```
 
@@ -758,16 +804,18 @@ something instead of asserting against itself.
   line in `buildCmd()`; left for a session that can re-run a Toronto tile and
   eyeball the export.
 - **macOS pass, 2026-09-01.** Node 26.8.1 installed via Homebrew, so
-  `node test_console.js` runs here → 48/48; `python3 test_export.py` → 29/29.
+  `node test_console.js` runs here → 50/50; `python3 test_export.py` → 32/32.
   `verify_bambu.py` put all three plate shapes through the real Bambu Studio CLI
   on macOS and passed, and its `find_bambu()` was widened to cover
   `Bambu Studio.app` (with a space), `~/Applications`, and a `PATH` fallback.
   `cmd2mac.py` was added for the `python` → `python3` rewrite. The in-browser
-  console *has* now been driven end to end here — a real Toronto preview built
-  and rendered correctly (this is also what caught the inside-out `FrontSide`
-  bug and confirmed the cube cover). A real `--split --box` build runs on every
-  preview now (`serve.py` `cfg_from`), so the parallel-fetch path has had a
-  live exercise; a bare-CLI invocation still has not.
+  console *has* now been driven end to end here — real Toronto previews (square
+  and hex) built and rendered correctly (this is also what caught the
+  inside-out `FrontSide` bug and confirmed the cube cover). A real
+  `--split --box` build runs on every preview now (`serve.py` `cfg_from`), so
+  the parallel-fetch path has had a live exercise; a bare-CLI invocation still
+  has not. `--tile-shape hex` / `circle` verified through a live preview;
+  `verify_bambu.py` has **not** been re-run on a hex/circle plate.
 - **A preview is still slow, just no longer additive.** The six Overture scans
   now run at once (see **Fetching**), so a build costs the slowest query rather
   than the sum — a 1.6 km London tile was 11m15s end to end, of which 4m10s was
