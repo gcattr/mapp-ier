@@ -432,12 +432,66 @@ def _shore_ramp_reaches_the_bands():
         ("bands shore not ramped", shore.min() if len(shore) else None)
 
 
+def _needle_summits_get_shaved():
+    """Terrain.limit_needles: a lone spike collapses to its surroundings, a
+    broad plateau of the same height survives, and a pit is never filled (it
+    is an opening, not a closing) - and nothing is ever raised."""
+    class T:
+        flat = False
+    t = T()
+    dem = np.full((90, 90), 100.0, np.float32)
+    dem[25, 25] = 500.0                       # 1-px needle
+    dem[45:65, 45:65] = 500.0                 # broad block, same height
+    dem[25, 60] = -100.0                      # a pit
+    orig = dem.copy()
+    t.dem = dem.copy()
+    M.Terrain.limit_needles(t, r_px=4.0)
+    out = t.dem
+    assert out[25, 25] < 160.0, ("needle not shaved", float(out[25, 25]))
+    assert out[55, 55] > 460.0, ("broad summit lost", float(out[55, 55]))
+    assert out[25, 60] < 0.0, ("a pit was filled - that is a closing, not an "
+                               "opening", float(out[25, 60]))
+    assert out.max() <= orig.max() + 1e-3, "limit_needles raised terrain"
+    # a flat sampler is left completely alone
+    class F:
+        flat = True
+        dem = np.zeros((4, 4), np.float32)
+    M.Terrain.limit_needles(F, r_px=8.0)
+
+
+def _terrain_drape_cell_follows_the_relief():
+    """A relief slab is grid-split fine enough to show the DEM, not at the
+    span/40 that is fine for a road footprint."""
+    proj = _Proj(12500.0)                     # a 25 km tile
+    cfg = M.Config(bbox=(-115.75, 51.07, -115.39, 51.29), size_mm=200.0,
+                   mode="terrain", terrain_grid=400)
+    span = 25000.0
+    coarse = max(30.0, span / 40.0)
+
+    class T:
+        flat = False
+
+        def dem_px_m(self, lat):
+            return 48.0
+
+    cell = M.terrain_drape_cell(cfg, proj, T())
+    assert cell < coarse, ("not finer than the road default", cell, coarse)
+    assert cell >= 48.0 - 1e-6, ("oversamples past the DEM pixel", cell)
+
+    class Flat:
+        flat = True
+
+    assert abs(M.terrain_drape_cell(cfg, proj, Flat()) - coarse) < 1e-6
+
+
 check("elevation band keys terrain_2..5 are recognised", _band_keys_recognised)
 check("bands default down the ramp and take a pick", _band_filaments_default_down_the_ramp)
 check("terrain slices drape on the relief and nest, not stepped plateaus", _slices_follow_the_relief)
 check("terrain slices are inset and lid-dropped so they do not Z-fight", _slices_do_not_zfight)
 check("the shore ramps to a beach, not a seawall, and a cliff keeps a falloff", _shore_ramps_not_a_seawall)
 check("the shore ramp reaches the elevation bands", _shore_ramp_reaches_the_bands)
+check("needle summits are shaved but broad peaks and pits survive", _needle_summits_get_shaved)
+check("a relief slab is grid-split fine enough to show the DEM", _terrain_drape_cell_follows_the_relief)
 
 
 # ------------------------------------------------------------- route mode

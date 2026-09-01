@@ -13,7 +13,7 @@ files.
 | `serve.py` | Local HTTP server: serves the console AND runs the exporter behind it. |
 | `map2model-console.html` | The web console. Single file, no build step. |
 | `test_console.js` | Offline harness for the console: stubs the DOM, Leaflet and three.js and invokes every top-level function. `node test_console.js`. |
-| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 44 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
+| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 46 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
 | `verify_bambu.py` | Loads each plate shape through the Bambu Studio CLI, has it re-export, and reads the filaments and per-part extruders back out. Skips cleanly when Bambu Studio is not installed. See **Verifying it**. |
 | `bambu_p1s_0.4.json` | A P1S 0.4 nozzle project config that Bambu Studio itself wrote (v02.05.00.66). `_project_settings()` widens its per-slot lists and writes our filaments in. Version-coupled — see **Known gaps**. |
 | `landmarks.json` | Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it **silently** when it is absent — so if it goes missing the CN Tower renders as straight prisms in preview *and* export, with no warning anywhere. It is tracked in git for exactly that reason. |
@@ -197,6 +197,37 @@ hence `terrain_zoom_max`.
 
 Stair-stepping on a steep slope is the DEM's own quantisation, not the grid;
 finer zoom reduces it but does not remove it.
+
+**A draped relief slab needs its own grid-split size.** `build_drape`'s default
+cell is `span/40` — right for a road footprint, hopeless for a whole-tile
+relief slab, which then samples the DEM at ~40 points across and prints as big
+flat facets no matter how good the DEM is (a 25 km Banff tile at z11 has ~520
+DEM samples across and was throwing away all but 40 of them). `terrain_drape_cell()`
+ties the split to `terrain_grid` instead (~`span/140` at the default 400),
+clamped so it never oversamples past the DEM's own pixel and never goes coarser
+than the old `span/40`. Used by `build_terrain_bands` and, for terrain/route
+mode only, the `run()` land plinth — a city plinth stays cheap because it is
+background under the buildings. Cost: ~4–5× the terrain triangles (a 25 km
+4-band Banff plate went ~95k → ~550k tris, ~4 MB), still well within a print
+3MF. The per-cell walls `build_drape` emits between adjacent grid squares are
+doubled and coincident — harmless (each cell is a closed solid, the union is
+watertight, the slicer fills it), but at a grazing angle the preview can
+z-fight along those seams. A shared-vertex terrain-band builder would fix both
+the waste and the seams; not done.
+
+**Needle summits.** A relief map compresses height far less than footprint — a
+25 km tile at 200 mm is 1:125 000 across but only ~4× vertical, so every real
+ridge prints ~4× steeper and an alpine tile comes out as a field of
+unprintable spikes. `Terrain.limit_needles()` does a grayscale morphological
+**opening** of the DEM raster (erode then dilate by an octagon ≈ disk, then a
+short blur, then `min()` against the original so it can only ever shave): any
+high feature narrower than `terrain_min_peak_mm` of print (default **6 mm**,
+`--terrain-min-peak-mm`, `0` = off) is pulled down to its surroundings, while a
+broad steep face keeps its full height and pitch and a valley/gorge is
+untouched (an opening removes thin *high* bumps only). Run once in `run()` for
+terrain/route mode, before any meshing, with the disk radius derived from the
+print scale. It lowers the tallest point a little (the relief scale is fixed
+first, so the model ends up a hair under "tallest = N mm").
 
 **Layer heights** match between exporter and preview: greenery 0.8 mm proud,
 roads 0.5 mm, water 0.6 mm, all embedded 0.35 mm into what's below.
@@ -542,7 +573,8 @@ grid would foul the shaped frame.
 shows it as a **What to make** control — City / Terrain / Route. `?mode=terrain`
 and `?mode=route` in the URL preselect it, which is how each Etsy listing
 deep-links. `serve.py`'s `cfg_from` reads `mode`, `terrain_bands`,
-`terrain_relief_mm`, `route`, `route_name`, `route_width_m`, `route_height_mm`.
+`terrain_relief_mm`, `terrain_min_peak_mm`, `route`, `route_name`,
+`route_width_m`, `route_height_mm`.
 
 `--mode terrain` drops buildings, roads and greenery (`run()` forces the
 `want_*` flags off) — a relief map is the land and the water. It **keeps** the
@@ -927,7 +959,7 @@ What it covers is everything *after* geometry: which filament each layer gets,
 what lands in the 3MF, and whether a slicer can read it back.
 
 ```bash
-python test_export.py                   # 44 checks, exit 0 = clean
+python test_export.py                   # 46 checks, exit 0 = clean
 ```
 
 Every check in it is a bug that shipped. The cover one in particular: the cover
@@ -999,7 +1031,7 @@ something instead of asserting against itself.
   line in `buildCmd()`; left for a session that can re-run a Toronto tile and
   eyeball the export.
 - **macOS pass, 2026-09-01.** Node 26.8.1 installed via Homebrew, so
-  `node test_console.js` runs here → 60/60; `python3 test_export.py` → 44/44.
+  `node test_console.js` runs here → 60/60; `python3 test_export.py` → 46/46.
   `verify_bambu.py` put all three plate shapes through the real Bambu Studio CLI
   on macOS and passed (re-run after the frame/cover signature change), and its
   `find_bambu()` was widened to cover `Bambu Studio.app` (with a space),
@@ -1037,10 +1069,23 @@ something instead of asserting against itself.
   **and** `serve.py` preview), 400+ terrain top-verts pulled to the datum at
   the waterline with a graded ramp inland, watertight, `verify_bambu` PASS, and
   the browser 3D preview shows a sloped bank all round the lake rather than a
-  wall. `test_export.py` 44/44, `test_console.js` 60/60. **Not** re-checked: a
+  wall. `test_export.py` 46/46, `test_console.js` 60/60. **Not** re-checked: a
   coastal *city* (`water_in_frame`, non-terrain) tile — the ramp is on that
   path too but only terrain tiles have been eyeballed; and `--shore-ramp-mm 0`
   (the old hard cut) has a test but no live build.
+- **Relief mesh + needle summits, phase 4e.** A 25 km Banff terrain tile came
+  out as coarse facets with a field of unprintable spike summits.
+  `terrain_drape_cell()` now grid-splits a draped relief slab ~`span/140`
+  instead of `span/40` (mesh ~95k → ~550k tris on that tile, 3MF ~4 MB, still
+  watertight, `verify_bambu` PASS), and `Terrain.limit_needles()` opens the DEM
+  by a `terrain_min_peak_mm` (6 mm) disk so spikes are shaved to printable
+  cones while broad faces keep their pitch. Verified live in the browser
+  preview: smooth slopes, broad rounded peak caps, no needles. `test_export.py`
+  46/46. **Not** checked: a real hand print of the shaved plate; the console
+  has no `terrain_min_peak_mm` control yet (the 6 mm default just applies), and
+  a bare-CLI `--terrain-min-peak-mm 0` (spikes back) has a unit test but no
+  build. Some grazing-angle z-fight on the finer drape's per-cell wall seams
+  (preview only; see **Terrain mode**'s note).
 - **A preview is still slow, just no longer additive.** The six Overture scans
   now run at once (see **Fetching**), so a build costs the slowest query rather
   than the sum — a 1.6 km London tile was 11m15s end to end, of which 4m10s was

@@ -357,6 +357,13 @@ class Config:
     terrain_zoom_max: int = 15    # terrarium has no useful detail past this
     terrain_grid: int = 400       # heightmap samples along the long axis
     terrain_relief_mm: float = 0.0  # 0 = true relief; >0 = normalise relief to this
+    terrain_min_peak_mm: float = 6.0  # in --mode terrain/route, shave any summit
+                                     # narrower than this (print mm) down to its
+                                     # surroundings - a grayscale opening on the
+                                     # DEM - so a 4x-exaggerated ridge does not
+                                     # come out as a field of unprintable
+                                     # needles. Broad steep faces are untouched.
+                                     # 0 = off.
 
     # layer thicknesses (mm, above the terrain surface)
     water_mm: float = 0.6
@@ -1126,6 +1133,29 @@ def terrain_zoom_for(cfg):
     return int(max(8, min(cfg.terrain_zoom_max, round(z))))
 
 
+def terrain_drape_cell(cfg, proj, terr):
+    """Grid-split size for a draped terrain slab.
+
+    `build_drape`'s default is span/40 - fine for a road footprint, far too
+    coarse for a whole-tile relief slab, which then samples the DEM at ~40
+    points across and prints as big flat facets no matter how good the DEM is.
+    Tie it to `terrain_grid` instead (~span/140 at the default 400), clamped so
+    it never oversamples past the DEM's own pixel and never goes coarser than
+    the old span/40.
+    """
+    span = proj.maxx - proj.minx
+    coarse = max(30.0, span / 40.0)
+    if terr.flat:
+        return coarse
+    want = span / max(cfg.terrain_grid * 0.35, 4.0)
+    try:
+        lat_r = math.radians((cfg.bbox[1] + cfg.bbox[3]) / 2.0)
+        want = max(want, terr.dem_px_m(lat_r))       # never oversample the DEM
+    except (AttributeError, TypeError):
+        pass
+    return float(min(coarse, want))
+
+
 class Terrain:
     """Bilinear elevation sampler in projected metres. Falls back to flat."""
 
@@ -1192,6 +1222,56 @@ class Terrain:
         lon, lat = self.proj.to_lonlat(np.asarray(x, dtype=float),
                                        np.asarray(y, dtype=float))
         return self.elev_lonlat(lon, lat)
+
+    def dem_px_m(self, lat_rad):
+        """Ground metres per DEM pixel at this latitude."""
+        if self.flat:
+            return 1e9
+        return 156543.03392 * math.cos(lat_rad) / (2.0 ** self.z)
+
+    def limit_needles(self, r_px):
+        """Grayscale morphological opening of the DEM by an ~r_px disk: erode
+        then dilate the same amount. Any high feature narrower than ~2*r_px
+        pixels is shaved down to the ground around it, so a summit that would
+        print as a needle becomes a stout cone - but a broad steep face keeps
+        its full height and pitch (opening only removes *thin* high bumps, and
+        leaves valleys/gorges alone). A short blur then rounds the blocky
+        plateau the opening leaves, and a final min() against the original
+        guarantees this only ever shaves terrain, never raises it. Cheap: a
+        handful of 3x3 passes on the raw DEM raster, before any meshing.
+        """
+        if self.flat:
+            return
+        k = int(round(r_px))
+        if k < 1:
+            return
+        k = min(k, 40)                               # sanity cap
+        orig = self.dem
+
+        def plus(a, op):                             # 4-neighbour
+            p = np.pad(a, 1, mode="edge")
+            return op.reduce([p[:-2, 1:-1], p[2:, 1:-1],
+                              p[1:-1, :-2], p[1:-1, 2:], a])
+
+        def sq(a, op):                               # 8-neighbour
+            p = np.pad(a, 1, mode="edge")
+            return op.reduce([p[:-2, 1:-1], p[2:, 1:-1], p[1:-1, :-2],
+                              p[1:-1, 2:], p[:-2, :-2], p[:-2, 2:],
+                              p[2:, :-2], p[2:, 2:], a])
+
+        # alternate plus/square each pass -> octagon -> ~disk, not a blocky box
+        d = orig
+        for i in range(k):
+            d = (plus if i % 2 else sq)(d, np.minimum)
+        for i in range(k):
+            d = (plus if i % 2 else sq)(d, np.maximum)
+        # round the blocky plateau the opening leaves behind (a low-pass can't
+        # put a needle back)
+        for _ in range(max(3, k)):
+            p = np.pad(d, 1, mode="edge")
+            d = (d + p[:-2, 1:-1] + p[2:, 1:-1]
+                 + p[1:-1, :-2] + p[1:-1, 2:]) / 5.0
+        self.dem = np.minimum(orig, d).astype(np.float32)
 
 
 # ----------------------------------------------------------------------------
@@ -2101,7 +2181,8 @@ def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
     x0, x1, y0, y1 = proj.minx, proj.maxx, proj.miny, proj.maxy
     # The contour grid. Finer than the old fixed 160 so the colour boundaries
     # do not look blocky on a big tile (a whole national park is a valid tile).
-    G = int(np.clip(round(cfg.terrain_grid * 0.7), 160, 320))
+    G = int(np.clip(round(cfg.terrain_grid * 0.7), 160, 420))
+    drape_cell = terrain_drape_cell(cfg, proj, terr)
     ny = max(8, int(G * (y1 - y0) / (x1 - x0)))
     xs = np.linspace(x0, x1, G)
     ys = np.linspace(y0, y1, ny)
@@ -2145,8 +2226,8 @@ def build_terrain_bands(cfg, proj, terr, S, bbox_poly, water_polys):
         if not polys:
             return None
         return build_drape(cfg, proj, terr, S, polys, 0.0, 0.0,
-                           label=label, flat_bottom=0.0, top_cap_mm=cap_mm,
-                           shore=shore)
+                           cell_m=drape_cell, label=label, flat_bottom=0.0,
+                           top_cap_mm=cap_mm, shore=shore)
 
     # a flat tile, or one slice asked for: a single smooth relief surface
     if emax < 1.0 or n == 1:
@@ -3272,6 +3353,21 @@ def run(cfg, out_path):
                          f"{cfg.terrain_relief_mm:.0f} mm "
                          f"(x{terr_relief_scale[0] * S.z:.2f} of true)")
 
+        # Shave needle summits. A relief map compresses height far less than
+        # footprint (here ~4x), so every real ridge prints ~4x steeper and an
+        # alpine tile comes out as a field of unprintable spikes. Open the DEM
+        # by a disk sized to `terrain_min_peak_mm` of print: anything narrower
+        # is pulled down to its surroundings, broad faces keep their pitch.
+        if (cfg.mode in ("terrain", "route") and cfg.terrain_min_peak_mm > 0
+                and not terr.flat):
+            lat_r = math.radians((cfg.bbox[1] + cfg.bbox[3]) / 2.0)
+            r_px = (cfg.terrain_min_peak_mm / S.xy) / terr.dem_px_m(lat_r) / 2.0
+            if r_px >= 1.0:
+                terr.limit_needles(r_px)
+                log(cfg, f"[relief] shaved summits narrower than "
+                         f"{cfg.terrain_min_peak_mm:.0f} mm "
+                         f"(~{r_px * 2:.0f} DEM px)")
+
     del FETCH_ERRORS[:]
     _EMPTY_RETRIED[0] = False
     buildings, parts, water, green, roads = fetch_all(cfg)
@@ -3480,9 +3576,14 @@ def run(cfg, out_path):
                      if land.geom_type in ("MultiPolygon", "GeometryCollection")
                      else [land])
             lands = [g for g in lands if g.geom_type == "Polygon" and not g.is_empty]
+            # a relief/route plinth IS the picture - give it a mesh fine enough
+            # to show the DEM; a city plinth is background under the buildings,
+            # so it keeps the cheap span/40 split.
+            pcell = (terrain_drape_cell(cfg, proj, terr)
+                     if cfg.mode in ("terrain", "route") else None)
             raw.append(("terrain",
                         build_drape(cfg, proj, terr, S, lands, 0.0, 0.0,
-                                    label="building land plinth",
+                                    cell_m=pcell, label="building land plinth",
                                     flat_bottom=0.0, shore=shore)))
     else:
         with Stage("mesh terrain", cfg.verbose):
@@ -3709,6 +3810,11 @@ def main():
     ap.add_argument("--terrain-relief-mm", type=float, default=0.0,
                     help="--mode terrain/route: scale the relief so the tallest "
                          "point is this many mm (0 = true scale)")
+    ap.add_argument("--terrain-min-peak-mm", type=float, default=6.0,
+                    help="--mode terrain/route: shave any summit narrower than "
+                         "this many print mm down to its surroundings so an "
+                         "exaggerated ridge does not print as a field of "
+                         "needles (0 = off)")
     ap.add_argument("--route", default="",
                     help="--mode route: the path as 'lat,lon;lat,lon;...' in "
                          "order (what the console writes for a drawn or "
@@ -3934,6 +4040,7 @@ def main():
     cfg = Config(bbox=bbox, size_mm=a.size, tile_shape=a.tile_shape,
                  mode=a.mode, terrain_bands=a.terrain_bands,
                  terrain_relief_mm=a.terrain_relief_mm,
+                 terrain_min_peak_mm=a.terrain_min_peak_mm,
                  route=a.route, route_name=a.route_name, route_file=a.route_file,
                  route_width_m=a.route_width_m, route_height_mm=a.route_height_mm,
                  z_exaggeration=a.zexag,

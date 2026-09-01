@@ -90,6 +90,7 @@ def cfg_from(q):
         mode=q.get("mode", ["city"])[0],
         terrain_bands=int(num("terrain_bands", 1)),
         terrain_relief_mm=num("terrain_relief_mm", 0.0),
+        terrain_min_peak_mm=num("terrain_min_peak_mm", 6.0),
         route=q.get("route", [""])[0],
         route_name=q.get("route_name", [""])[0],
         route_width_m=num("route_width_m", 12.0),
