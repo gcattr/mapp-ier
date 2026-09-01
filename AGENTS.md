@@ -9,13 +9,18 @@ files.
 
 | File | What it is |
 |---|---|
-| `map2model.py` | The exporter. ~2500 lines, version `0.9.0-osm`. Does everything. |
+| `map2model.py` | The exporter. ~3300 lines, version `0.9.0-osm`. Does everything. |
 | `serve.py` | Local HTTP server: serves the console AND runs the exporter behind it. |
 | `map2model-console.html` | The web console. Single file, no build step. |
 | `test_console.js` | Offline harness for the console: stubs the DOM, Leaflet and three.js and invokes every top-level function. `node test_console.js`. |
+| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 26 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
+| `verify_bambu.py` | Loads each plate shape through the Bambu Studio CLI, has it re-export, and reads the filaments and per-part extruders back out. Skips cleanly when Bambu Studio is not installed. See **Verifying it**. |
+| `bambu_p1s_0.4.json` | A P1S 0.4 nozzle project config that Bambu Studio itself wrote (v02.05.00.66). `_project_settings()` widens its per-slot lists and writes our filaments in. Version-coupled — see **Known gaps**. |
 | `landmarks.json` | Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it **silently** when it is absent — so if it goes missing the CN Tower renders as straight prisms in preview *and* export, with no warning anywhere. It is tracked in git for exactly that reason. |
 | `Bambu_PLA_Basic_Hex_Code.pdf`, `Bambu_PLA_Matte_Hex_Code.pdf` | Bambu's own filament hex tables. The source of truth for every colour in `FILAMENTS`; keep them, and re-read them rather than trusting a hex you remember. |
+| `photo.png` | Reference screenshot: a land plate open in Bambu Studio's Prepare tab with four PLA Basic filaments already in slots 1–4. Proof the Bambu project metadata does what **Bambu Studio project metadata** claims. |
 | `test_offline.py` | **MISSING from this folder.** Offline fixture — stubs `fetch_all()` so you can test without network. Never committed and not in the Recycle Bin, so it has to be rewritten; the Testing section below cannot run until it is. |
+| `cmd2mac.py` | Rewrites an Etsy-order command's `python map2model.py …` prefix to `python3 …` so it runs on macOS. Interpreter prefix only; every build flag passes through. `python3 cmd2mac.py --clip` converts the clipboard in place. `--selftest` for the 12 pinned cases. |
 
 ## Running it
 
@@ -23,6 +28,11 @@ files.
 python serve.py            # Windows: python   Mac: python3
 # -> http://localhost:8000/map2model-console.html
 ```
+
+The console writes its copied command with a bare `python` prefix (the shop
+prints from Windows). To run one on a Mac, pipe it through `cmd2mac.py` first —
+`python3 cmd2mac.py --clip` rewrites whatever is on the clipboard to `python3`
+and puts it back, arguments untouched.
 
 `map2model.py`, `serve.py` and `map2model-console.html` must sit in the same
 folder; `landmarks.json` too, once it exists. `serve.py` reads `PORT` from the
@@ -124,9 +134,11 @@ really is mostly roof) and `--max-ridge-frac` for ridge roofs. They must stay
 separate: one shared clamp is what turned entire buildings into wedges — the
 "triangular prisms facing the wrong way" bug.
 
-`--max-ridge-frac` now defaults to **0.98**, the top of the console's slider
-(`min 0.2 / max 0.98`), so the CLI and the console agree out of the box. It used
-to default to 0.45. At 0.98 a gabled roof may eat almost the whole building, so
+`--max-ridge-frac` now defaults to **0.98**, the value the console hard-codes in
+its `DETAIL` constant and spells into every copied command, so the CLI and the
+console agree out of the box. It used to default to 0.45; the console used to
+expose this as a slider (`min 0.2 / max 0.98`) before the Detail panel was
+removed (see **What is deliberately not in the console**), and 0.98 was its top. At 0.98 a gabled roof may eat almost the whole building, so
 a mis-detected ridge shows up as a full-height wedge rather than a small hat —
 that is the trade for matching the console. `--roofs symmetric` (the default)
 sidesteps it entirely by never emitting ridge roofs.
@@ -693,6 +705,24 @@ something instead of asserting against itself.
   ever committed. `landmarks.json` is tracked now. `test_offline.py` was not so
   lucky. Anything that is source and not output belongs in git the day it is
   written.
+- **The copied command does not pass `--landmarks`; the browser preview does.**
+  `exactParams()` in the console sends `landmarks: 'landmarks.json'` to
+  `/api/start`, so the 3D preview shows the CN Tower with its legs and mast.
+  `buildCmd()` — the string the buyer pastes into the Etsy order — omits
+  `--landmarks` entirely, and `map2model.py` defaults it to `""` (no auto-load,
+  line 3085). A seller who runs the pasted command by hand therefore prints
+  straight prisms where the preview promised a shaped landmark. The fix is one
+  line in `buildCmd()`; left for a session that can re-run a Toronto tile and
+  eyeball the export.
+- **macOS pass, 2026-09-01.** Node 26.8.1 installed via Homebrew, so
+  `node test_console.js` runs here → 45/45; `python3 test_export.py` → 26/26.
+  `verify_bambu.py` put all three plate shapes through the real Bambu Studio CLI
+  on macOS and passed, and its `find_bambu()` was widened to cover
+  `Bambu Studio.app` (with a space), `~/Applications`, and a `PATH` fallback.
+  `cmd2mac.py` was added for the `python` → `python3` rewrite. Still not done:
+  the in-browser console has never been driven end to end here (browser tools
+  were off for the session), and no real CLI build has run since the
+  parallel-fetch change — see the slow-preview bullet.
 - **A preview is still slow, just no longer additive.** The six Overture scans
   now run at once (see **Fetching**), so a build costs the slowest query rather
   than the sum — a 1.6 km London tile was 11m15s end to end, of which 4m10s was

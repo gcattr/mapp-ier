@@ -19,6 +19,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,7 +28,21 @@ import zipfile
 CANDIDATES = [
     r"C:\Program Files\Bambu Studio\bambu-studio.exe",
     r"C:\Program Files (x86)\Bambu Studio\bambu-studio.exe",
+    # macOS ships the app as "BambuStudio.app" on older builds and
+    # "Bambu Studio.app" (with a space) on newer ones.
     "/Applications/BambuStudio.app/Contents/MacOS/BambuStudio",
+    "/Applications/Bambu Studio.app/Contents/MacOS/BambuStudio",
+]
+
+# Globs, tried in order after the exact paths miss. Covers a differently named
+# macOS app bundle, a Windows install outside the default folder, and a Linux
+# AppImage/package.
+GLOBS = [
+    "/Applications/*[Bb]ambu*[Ss]tudio*.app/Contents/MacOS/*[Ss]tudio",
+    os.path.expanduser(
+        "~/Applications/*[Bb]ambu*[Ss]tudio*.app/Contents/MacOS/*[Ss]tudio"),
+    r"C:\Program Files\*\bambu-studio.exe",
+    "/usr/bin/bambu-studio", "/usr/local/bin/bambu-studio",
 ]
 
 
@@ -35,8 +50,13 @@ def find_bambu():
     for c in CANDIDATES:
         if os.path.exists(c):
             return c
-    hit = glob.glob(r"C:\Program Files\*\bambu-studio.exe")
-    return hit[0] if hit else None
+    for pat in GLOBS:
+        hit = glob.glob(pat)
+        if hit:
+            return hit[0]
+    # Last resort: anything on PATH (Linux packages, or a user symlink).
+    return shutil.which("bambu-studio") or shutil.which("bambu_studio") \
+        or shutil.which("BambuStudio")
 
 
 # The three plates --split actually writes. Each has a different filament
