@@ -341,6 +341,21 @@ check('every preview material colour goes through FIL', () => {
   ok(!raw.length, raw.length + ' material(s) took a raw hex instead of FIL()');
   materials.forEach(m => ok(m.color instanceof Color, 'material colour is not a THREE.Color'));
 });
+check('every preview material draws both faces', () => {
+  // Exporter winding is not canonical (GEOS vertex order shifts between
+  // builds), so a Mac render with the default FrontSide culled the outward
+  // faces and the model looked inside-out. Every buildExactScene material
+  // must set side: DoubleSide.
+  materials.length = 0;
+  G.buildExactScene([
+    { name: 'terrain',   positions: [0,0,0, 10,0,0, 10,10,0], indices: [0,1,2], size: [10,10,1] },
+    { name: 'buildings', positions: [0,0,0, 5,0,0, 5,5,9],    indices: [0,1,2], size: [5,5,9] },
+    { name: 'water',     positions: [0,0,0, 8,0,0, 8,8,0],    indices: [0,1,2], size: [8,8,1] },
+  ]);
+  ok(materials.length >= 3, 'expected materials, got ' + materials.length);
+  const flat = materials.filter(m => m.side !== THREE.DoubleSide);
+  ok(!flat.length, flat.length + ' material(s) left at FrontSide (inside-out on Mac)');
+});
 
 /* ---------------- 4b. building a second preview ---------------- */
 console.log('\npreviewing twice in a row does not throw:');

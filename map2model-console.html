@@ -1449,13 +1449,20 @@ function buildExactScene(layers){
       geo.addGroup(0, up.length, 0);
       geo.addGroup(up.length, side.length, 1);
       mat = [new THREE.MeshPhongMaterial({color:FIL(shown('water')), flatShading:true,
-               shininess:38, specular:0x24405c}),
+               side:THREE.DoubleSide, shininess:38, specular:0x24405c}),
              new THREE.MeshPhongMaterial({color:FIL(shown('frame')), flatShading:true,
-               shininess:6, specular:0x101418})];
+               side:THREE.DoubleSide, shininess:6, specular:0x101418})];
     } else {
       // flat shading: the 3MF shares vertices between faces, so averaged
-      // normals round off every building corner and the model looks smeared
+      // normals round off every building corner and the model looks smeared.
+      // DoubleSide: triangle winding out of the exporter is not canonical -
+      // GEOS orders minimum_rotated_rectangle vertices differently between
+      // builds, so a mesh that faces outward on Windows can face inward on a
+      // Mac, and with the default FrontSide the whole model culls to a hollow
+      // "inside-out" shell. Drawing both faces makes winding irrelevant here;
+      // the 3MF itself is untouched and the slicer re-derives its own normals.
       mat = new THREE.MeshPhongMaterial({color:FIL(colour), flatShading:true,
+              side:THREE.DoubleSide,
               shininess:L.name === 'buildings' ? 14 : 5,
               specular:L.name === 'buildings' ? 0x2a2f33 : 0x14181b});
     }

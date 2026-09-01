@@ -475,6 +475,19 @@ a material skips the conversion and that one layer goes chalky again. Lighting
 summed to ~2.1 of near-white, which parks every surface at the top of its range
 where hue washes out regardless; it is now ~1.5, exposure 1.12 → 0.95.
 
+**Every preview material is `THREE.DoubleSide`.** Triangle winding out of the
+exporter is not canonical — GEOS orders `minimum_rotated_rectangle` (and other)
+vertices differently between builds, the same reason a file renders differently
+on macOS and Windows (see the geometry section). With the three r128 default of
+`side: FrontSide`, a mesh whose faces wind outward on Windows winds *inward* on
+a Mac, every outward surface is culled, and the model renders as a hollow
+"inside-out" shell — see-through terrain, a detached-looking frame. Every other
+preview path already set `DoubleSide`; `buildExactScene()` was the one that
+didn't, so the wired-up preview was the only one that broke. It's a
+preview-only fix: the 3MF geometry is untouched and the slicer re-derives its
+own normals. `test_console.js` pins it ("every preview material draws both
+faces").
+
 **The ghost rectangle must be cleared on every exit path.** Releasing the mouse
 outside the map container never fires Leaflet's `mouseup`, so the dashed drag
 rectangle stayed on the map and the next drag drew a second one — the "two boxes
