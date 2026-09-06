@@ -45,6 +45,8 @@ function makeEl(id) {
     click() { el.dispatch('click', {}); },
     querySelectorAll() { return []; },
     querySelector() { return null; },
+    setAttribute(k, v) { el[k] = String(v); },
+    getAttribute(k) { return el[k] === undefined ? null : el[k]; },
     appendChild() {}, remove() {}, focus() {}, blur() {},
     getContext() { return {}; },
     getBoundingClientRect() { return {left:0, top:0, right:640, bottom:420, width:640, height:420}; },
@@ -689,6 +691,86 @@ check('the map zoom buttons do not sit on the search box', () => {
   ok(m[1] !== 'topleft', 'zoom was put back where the map tools are');
 });
 
+check('place search requests a shortlist instead of accepting one ambiguous match', () => {
+  ok(/limit=8/.test(src), 'search still requests only one result');
+  ok(/addressdetails=1/.test(src), 'search results have no location details');
+  ok(/wikipedia\.org\/w\/api\.php/.test(src), 'notable landmarks have no alias-aware source');
+  ok(!/centre=\{lat:\+j\[0\]/.test(src), 'search still jumps directly to the first result');
+});
+
+check('place suggestions show useful location context', () => {
+  const bigBen = {
+    name: 'Big Ben', type: 'clock', lat: '51.5007', lon: '-0.1246',
+    display_name: 'Big Ben, Westminster, London, England, United Kingdom',
+    address: {city: 'London', state: 'England', country: 'United Kingdom'},
+  };
+  const australian = {
+    name: 'Big Ben', type: 'peak', lat: '-36.8', lon: '147.1',
+    address: {municipality: 'Alpine Shire', state: 'Victoria', country: 'Australia'},
+  };
+  eq(G.placeContext(bigBen), 'London, England, United Kingdom', 'London context');
+  eq(G.placeContext(australian), 'Alpine Shire, Victoria, Australia', 'Australia context');
+  G.showSearchResults([bigBen, australian]);
+  const list = document.getElementById('searchResults');
+  ok(/London, England, United Kingdom/.test(list.innerHTML), 'London label missing');
+  ok(/Alpine Shire, Victoria, Australia/.test(list.innerHTML), 'Australia label missing');
+  eq(document.getElementById('q').getAttribute('aria-expanded'), 'true', 'list not announced');
+});
+
+check('address suggestions show the street and ask for city and region', () => {
+  const nearby={name:'26',type:'building',lat:'43.86',lon:'-79.31',
+    address:{house_number:'26',road:'Luzon Avenue',city:'Markham',state:'Ontario',country:'Canada'}};
+  eq(G.placeTitle(nearby), '26 Luzon Avenue', 'street was hidden behind the house number');
+  const hint=G.addressGuidance('30 Luzon Ave',[nearby]);
+  ok(/add the city and region or country/i.test(hint), 'missing specificity advice: '+hint);
+  ok(/30 Luzon Ave, Markham, Ontario/.test(hint), 'missing concrete example: '+hint);
+  ok(/different parts of the world/i.test(hint), 'worldwide ambiguity is not explained');
+  G.showSearchResults([nearby],hint);
+  const list=document.getElementById('searchResults').innerHTML;
+  ok(/26 Luzon Avenue/.test(list), 'result does not name the street');
+  ok(/search-tip/.test(list), 'guidance is not shown with the suggestions');
+});
+
+check('a specific address warns when only a nearby house number is found', () => {
+  const nearby={name:'26',lat:'43.86',lon:'-79.31',
+    address:{house_number:'26',road:'Luzon Avenue',city:'Markham',state:'Ontario',country:'Canada'}};
+  const hint=G.addressGuidance('30 Luzon Ave, Markham, Ontario',[nearby]);
+  ok(/Exact house number 30 was not found/.test(hint), 'nearby match is presented as exact: '+hint);
+  ok(/check the street and location/i.test(hint), 'nearby warning lacks a safety check');
+});
+
+check('a grouped building address can still contain the exact house number', () => {
+  const group={address:{house_number:'26,28,30,32,34',road:'Luzon Avenue',
+    city:'Markham',state:'Ontario',country:'Canada'}};
+  ok(G.resultHasAddressNumber(group,'30'), '30 was missed inside the grouped building address');
+  const hint=G.addressGuidance('30 Luzon Ave, Markham, Ontario',[group]);
+  ok(!/was not found/.test(hint), 'an exact grouped address was incorrectly called nearby: '+hint);
+});
+
+check('choosing a suggestion is the step that moves the map', () => {
+  G.showSearchResults([{name:'Big Ben',type:'clock',lat:'51.5007',lon:'-0.1246',
+    address:{city:'London',state:'England',country:'United Kingdom'}}]);
+  G.selectSearchResult(0);
+  ok(/Centred on Big Ben.*London/.test(document.getElementById('areaHint').textContent),
+     'selected location was not confirmed clearly');
+  ok(document.getElementById('searchResults').classList.contains('hidden'),
+     'suggestion list stayed open after a choice');
+});
+
+check('notable landmark aliases are merged ahead of generic map matches', () => {
+  const wiki = G.wikipediaPlaces({query:{pages:{'1':{
+    index:1,title:'Big Ben',description:'Clock bell in London, England',
+    coordinates:[{lat:51.5007,lon:-0.1246}],
+  }}}});
+  eq(wiki.length, 1, 'Wikipedia coordinate was not converted');
+  const peaks=[{name:'Big Ben',type:'peak',lat:'-29.48',lon:'151.66',
+    address:{state:'New South Wales',country:'Australia'}}];
+  const merged=G.mergePlaceMatches(wiki,peaks);
+  eq(merged[0].lat, '51.5007', 'the notable landmark was not ranked first');
+  eq(G.placeContext(merged[0]), 'Clock bell in London, England', 'landmark context lost');
+  eq(merged.length, 2, 'related map matches were discarded');
+});
+
 check('a browser that blocks storage still loads the page', () => {
   sandbox.localStorage.store = null;            // every access now throws
   G.maybeOpenTour();                            // must not throw
@@ -715,6 +797,23 @@ check('the old boolean showTab calls still work', () => {
   ok(!document.getElementById('panePrev').classList.contains('hidden'), 'showTab(true)');
   G.showTab(false);
   ok(!document.getElementById('paneMap').classList.contains('hidden'), 'showTab(false)');
+});
+
+check('the customer console is City-only while Terrain and Circuit are paused', () => {
+  const terrain=html.match(/<button data-mode="terrain"[^>]*>/);
+  const route=html.match(/<button data-mode="route"[^>]*>/);
+  ok(terrain&&/disabled/.test(terrain[0]),'Terrain button is still enabled');
+  ok(route&&/disabled/.test(route[0]),'Circuit button is still enabled');
+  const startup=src.slice(src.lastIndexOf('DISCLAIMER_HTML'));
+  ok(!/setMode\s*\(\s*m\s*\)/.test(startup),'an old ?mode= deep-link bypasses the pause');
+});
+
+check('the FAQ contains quick fixes and Etsy support instructions', () => {
+  ok(/FAQ &amp; quick fixes/.test(html),'FAQ section missing');
+  ok(/The map found the wrong place/.test(html),'place-search quick fix missing');
+  ok(/One layer covers most of my model/.test(html),'layer quick fix missing');
+  ok(/The preview will not build/.test(html),'preview quick fix missing');
+  ok(/Message me on Etsy for any issues/.test(html),'Etsy support message missing');
 });
 
 /* ---------------- the detail panel is gone but its settings are not --------- */
@@ -852,6 +951,27 @@ check('stitchOsmWays joins touching ways into one ordered path', () => {
   eq(p.length, 5, 'ways were not stitched end to end: ' + JSON.stringify(p));
   eq(p[4].join(','), '0,4', 'stitched path ends in the wrong place');
   eq(G.stitchOsmWays([]).length, 0, 'empty element list should give no path');
+});
+check('circuit lookup shows location-labelled suggestions before loading geometry', () => {
+  const road={name:'Silverstone Circuit',type:'raceway',osm_type:'way',osm_id:123,
+    address:{village:'Silverstone',state:'England',country:'United Kingdom'}};
+  const town={name:'Silverstone',type:'village',osm_type:'relation',osm_id:456,
+    address:{state:'England',country:'United Kingdom'}};
+  const ranked=G.rankCircuitMatches([town,road]);
+  eq(ranked[0].name,'Silverstone Circuit','raceway was not ranked ahead of a related place');
+  eq(ranked.length,1,'an unrelated place was mixed into the circuit matches');
+  eq(G.circuitKind(road),'race circuit','circuit has an unhelpful generic type label');
+  G.showCircuitResults(ranked);
+  const list=document.getElementById('circuitResults');
+  ok(/Silverstone, England, United Kingdom/.test(list.innerHTML),'circuit location missing');
+  ok(/Circuit names can repeat/.test(list.innerHTML),'ambiguity warning missing');
+  eq(document.getElementById('routeQ').getAttribute('aria-expanded'),'true','suggestions not announced');
+});
+check('choosing a circuit targets its exact OpenStreetMap object', () => {
+  eq(G.circuitOverpassQuery({osm_type:'way',osm_id:123}),
+     '[out:json][timeout:25];way(123);out geom;','way query');
+  eq(G.circuitOverpassQuery({osm_type:'relation',osm_id:456}),
+     '[out:json][timeout:25];relation(456);out geom;','relation query');
 });
 check('setMode route rewrites the command and the preview params', () => {
   G.setMode('route');

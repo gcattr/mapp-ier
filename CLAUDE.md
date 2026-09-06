@@ -989,7 +989,7 @@ a call to a function that no longer exists passes cleanly. This bit twice
 `test_console.js` is that harness. No dependencies, no network, no browser:
 
 ```bash
-node test_console.js                    # 60 checks, exit 0 = clean
+node test_console.js                    # 71 checks, exit 0 = clean
 node test_console.js old-console.html   # point it at an older copy
 ```
 
@@ -1010,6 +1010,56 @@ of this console is `const name = (…) => …`; the harness appends a `var __C =
 export block built from the source to reach those. And the stub `THREE.Color`
 implements the real sRGB→linear transfer function, so the colour check measures
 something instead of asserting against itself.
+
+## Customer console status — 2026-09-05
+
+The customer console is **temporarily City-only**. Terrain and Circuit remain
+implemented in the exporter and in the console source, but their segmented
+buttons are disabled and labelled `Paused`; old `?mode=terrain` and
+`?mode=route` deep-links are ignored. Do not delete those implementations. To
+restore them, re-enable the buttons and restore the startup deep-link block,
+then run the full console harness and a live preview for each mode.
+
+Place search no longer accepts Nominatim's first ambiguous match. An explicit
+Find requests up to eight location-labelled Nominatim results and merges
+coordinate-bearing Wikipedia results ahead of them for notable aliases (this
+is why `Big Ben` now surfaces London before Australian peaks). Address-shaped
+queries skip Wikipedia. Results show street, city, region and country; an
+under-specified address gets a concrete specificity suggestion derived from
+the best result (`30 Luzon Ave` → `30 Luzon Ave, Markham, Ontario`). The map
+moves only after the buyer chooses a result. Keep this as explicit search, not
+keystroke autocomplete.
+
+The paused Circuit picker also has a completed shortlist flow: Nominatim finds
+candidate OSM ways/relations, circuit-like features rank first, unrelated
+nearby roads are dropped when a circuit match exists, and choosing a result
+asks Overpass for that exact OSM id. A live Spa-Francorchamps check returned
+the Belgium circuit and loaded a 286-point path. This code is intentionally
+preserved behind the disabled Circuit button.
+
+The sidebar now ends with an expandable **FAQ & quick fixes** and a support box
+that says `Message me on Etsy for any issues`; it asks the buyer to include the
+place, a screenshot and the copied personalisation code. Keep this wording
+customer-facing and jargon-free.
+
+### Confirmed Spa greenery/road overlap bug
+
+A real City-mode build centred on Spa-Francorchamps was inspected from its
+generated 3MF, not inferred from the preview. Greenery covers 37,652.4 mm²
+(94.1% of the 200 mm square); that coverage is geographically plausible because
+the circuit is in dense mapped forest, so it is not by itself the old
+continent-sized blanket bug. The actual bug is layer precedence: 516.7 of
+525.8 mm² of road footprint (98.3%) overlaps greenery, while greenery is 0.8 mm
+proud and roads only 0.5 mm. `run()` dissolves both and subtracts water from
+each, but never subtracts roads from greenery before `build_drape()`, so
+greenery can physically mask nearly every road. Turning greenery off is only a
+workaround. The likely fix is to difference the dissolved road union from
+`green_p` before meshing, with exporter tests proving overlap is zero and the
+parts stay watertight. This has been diagnosed but **not fixed**.
+
+The console harness currently passes **71/71** after the search, FAQ and paused
+mode changes. `BUGMAC.png` is an unrelated untracked user file and was
+deliberately not added.
 
 ## Known gaps / next steps
 
