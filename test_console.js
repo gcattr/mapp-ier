@@ -83,12 +83,17 @@ const leafletMap = {
 };
 function layer() {
   const o = {
-    _bounds: null, _latlngs: null,
+    _bounds: null, _latlngs: null, _latlng: {lat:0,lng:0}, _handlers: {},
     addTo(m) { m.addLayer ? m.addLayer(o) : mapLayers.add(o); return o; },
     setBounds(b) { o._bounds = b; return o; },
     getBounds() { return o._bounds || [[0,0],[0,0]]; },
     setLatLngs(p) { o._latlngs = p; return o; },
+    setLatLng(ll) { o._latlng = ll; return o; },
+    getLatLng() { return o._latlng; },
+    getElement() { return o._el || (o._el = makeEl('layer-el')); },
     setStyle() { return o; }, remove() { mapLayers.delete(o); },
+    on(t, f) { (o._handlers[t] = o._handlers[t] || []).push(f); return o; },
+    fire(t, ev) { (o._handlers[t] || []).forEach(f => f(ev)); },
   };
   return o;
 }
@@ -100,9 +105,11 @@ const L = {
   polyline() { return layer(); },
   circle() { return layer(); },
   marker() { return layer(); },
+  divIcon(opts) { return opts; },
   latLng: latlng,
   // the zoom control is added by hand so it does not land on the search box
   control: { zoom(opts) { return { opts, addTo() { return this; } }; } },
+  DomEvent: { stopPropagation() {} },
 };
 
 /* ---------------- three.js stub ---------------- */

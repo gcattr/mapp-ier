@@ -175,6 +175,25 @@ wide: fragile, ugly, and it sets `tallest`, which sets the cover height for the
 whole model. Past `--floating-aspect` (12 : 1 height to width) the part is
 dropped instead. Both counts are in the funnel.
 
+**A multi-part building needs ONE ground, not one per part.** `resolve_floating`
+gets the Z axis right, but a real Eiffel Tower export still came out with the
+antenna mast floating 0.13 mm above the platform below it, and looser seams
+lower down. Cause: `emit()` samples the terrain DEM under *that part's own
+footprint* to find `z_ground` — fine for a single-volume building, wrong for
+one with parts, because the Eiffel Tower's ~125 m footprint crosses real
+elevation change, so each part's own patch of ground differs slightly and
+stacked tiers no longer line up. `build_buildings()` now samples ground once,
+from the PARENT's own footprint (the widest thing at grade), and every part of
+that building shares it via `emit(..., z_ground=shared_ground)`; a
+single-volume building is unaffected, since it only ever had one footprint to
+sample from anyway. Verified on the reported tile: the mast now sits at
+*exactly* the same height as the platform under it (0 mm gap, was 0.13 mm),
+and re-checked the CN Tower still exports clean. The Eiffel Tower still has no
+`landmarks.json` entry — only the CN Tower and Rogers Centre do — so it gets no
+`shared_c` axis anchor or spire merging; what looked like a slanted, barely-
+connected roof was this same ground-sampling drift on a smaller scale, not a
+roof bug, and cleared up with the rest once ground was shared.
+
 **Synthesised tapers are opt-in.** `spire_taper=False` by default. Turning it on
 needles the top of *every* parts-bearing building, which spikes the whole city.
 The CN Tower's flare only exists via `--landmarks`; OSM/Overture model the legs
@@ -916,6 +935,93 @@ things that cost money if they are missed:
 visitor sees a drawn page behind the card rather than a blank one. There is a
 test that the startup sequence actually calls it: the function existed, was
 correct, and was never wired up, so nobody would have seen the tour at all.
+
+**The visual identity, 2026-09-17.** The console read as a generic technical
+dashboard — cool blue-grey, IBM Plex everywhere, tracked-uppercase labels on
+every heading, flat 2px corners on everything — which is the wrong register
+for a keepsake an Etsy buyer is picking colours for, not a GIS tool. Redesign
+is a skin only: every class name and id JS depends on is untouched (checked
+against `classList`/`getElementById` usage before touching CSS), so
+`test_console.js` needed no changes for it. The palette traces to the product
+itself rather than an arbitrary choice: the header/tabs/command bar are a deep
+cyanotype blueprint blue (`--plate`, `#12395E`) because this literally is a
+blueprint-to-model pipeline, and the primary accent (`--accent`, `#0078BF`) is
+the exact hex of the shop's own PLA Marine Blue filament — the colour doing UI
+work is a colour the printer can actually load. Type: `Bricolage Grotesque`
+for headings/wordmark (display), `Archivo`/`Archivo Narrow` for UI text,
+`IBM Plex Mono` kept but narrowed to real data (coordinates, mm, the copied
+command) instead of decorating ordinary labels. The tracked-uppercase-label
+device survives in exactly one place, the header's spec readout (tile/model/
+frame/scale), because that one is a genuine measurement plate, not a title.
+Swatches (`.dot`/`.cdot`/`.odot`) are circular now, not square — reads as a
+dab of the actual filament. `.grid.hidden` (the colour picker) overrides the
+page-wide `.hidden{display:none!important}` with a more specific, still
+`!important`, rule so it animates open/closed instead of snapping.
+
+**Editing a placed tile directly, 2026-09-17.** Before this the only way to
+change a tile you had already placed was the width slider or redrawing it
+from nothing with "Drag a tile". Four round `L.marker` handles (`handles.nw`
+etc., divIcons, `draggable:true`) sit at the tile's corners and resize it in
+place; grabbing the tile body itself (`rect.on('mousedown', …)`) moves it
+without resizing. Both are disabled while the explicit redraw mode (`drawing`)
+is on, so the two ways of changing the tile do not fight.
+
+Resizing from a corner needed different maths than the existing
+`squareFrom(a,b)`, which centres on the *midpoint* of its two points — right
+for drawing a brand new tile, wrong for a resize: unless the drag is exactly
+on the 45° diagonal from the opposite corner, the midpoint drifts off it and
+the "fixed" corner visibly slides, reading as "resizing also moves the tile."
+`squareFromCorner(anchor, drag)` keeps `anchor` an exact corner instead, and
+two more things have to hold for that to be *exact* rather than approximate:
+(1) latitude must be computed before longitude, and longitude's cos(lat) term
+must use that RESULT latitude, not the anchor/drag midpoint — `bboxOf()`
+downstream converts metres to degrees of longitude using the centre's own
+latitude, and using a different reference latitude upstream reintroduces a
+few metres of drift on the very axis this function exists to pin down; (2)
+`spanM` has to be rounded to the nearest 50 m *before* the anchor-preserving
+centre is computed, not after — round after, and the centre was placed for a
+span the tile then does not actually draw once rounded, drifting the anchor by
+up to half that step. Both were caught by logging the actual anchor vs. the
+rendered bbox mid-drag, not by reasoning about the algebra alone.
+
+Past the 8 km hard cap (`MAXSPAN`, already enforced everywhere span can
+change: the slider's own `max`, the ghost-rectangle draw flow, and now the
+handles) the tile and its handles turn red (`updateRectStyle()`,
+`#B5502C`) — the console warns rather than blocks, but the warning is now on
+the map itself, which is what a buyer resizing the tile is actually looking
+at, not just a line of text under the slider.
+
+**Shape (hex/circle) is paused like Terrain/Circuit, 2026-09-17.** The
+buyer-facing Shape row and the "What to make" section are both `.hidden` in
+the HTML, not deleted — `setShape`/`setMode` and their event wiring are
+untouched, `shape` stays `'square'`. Same reasoning as the Terrain/Circuit
+pause below: with the city-only console live, offering a choice most of whose
+options do nothing is a way to order something you did not mean, not a
+feature. Re-enable by deleting the `hidden` class on both.
+
+**The build-log "fetching" spinner was a rotated character, not a spinner.**
+`licon()` used `'◐'` (a half-filled circle) with a CSS rotation — visually
+close to a flicker rather than motion, since a mostly-symmetric glyph does not
+read as turning. The "now" row now renders a real ring element (`<i
+class="lspin">`, a bordered circle with one arc coloured, same technique as
+the existing `.spin` full-size spinner) instead of licon's text glyph for that
+one state; `done`/`fail`/`empty`/`wait` still use the static glyphs.
+
+**The preview disclaimer stopped claiming to be "exact."** It used to open
+with "Exact model," contrasting itself with a sketch — accurate but the wrong
+thing to lead with for a buyer who cannot act on "not a sketch." It now says
+plainly that this is the model that would be printed, and warns that very
+thin details (a narrow spire, a slim railing) can be too fine for the nozzle
+and may print simplified or missing — the actual, actionable caveat, matching
+what `--min-feature` and `resolve_floating`'s `drop` path really do to a tile.
+
+**The header readout only speaks up for problems now.** It used to show a
+green "detail will hold" chip whenever the tile was fine — reassurance nobody
+asked for, next to the ONE thing in that corner that matters (an actual
+warning: frame exceeds the plate, or too coarse). The "everything's fine"
+branch now leaves `#rWarn` empty; the equivalent note ("features down to about
+N m come through cleanly") still lives in the Tile panel's own `sizeNote`,
+where a buyer is already looking.
 
 ## What is deliberately not in the console
 

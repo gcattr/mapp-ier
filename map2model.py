@@ -2627,12 +2627,22 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
 
     def emit(rec, poly, base_m, top_m, is_top=True,
              rule=None, allowed=False, force_spire=False,
-             center=None):
+             center=None, z_ground=None):
         nonlocal n_tri_fail, made, tallest
-        gz = terr.elev_xy(np.asarray(poly.exterior.coords)[:, 0],
-                          np.asarray(poly.exterior.coords)[:, 1])
-        ground = float(np.min(gz))
-        z_ground = (ground - terr_min[0]) * S.z + cfg.base_mm
+        # z_ground defaults to sampling THIS part's own footprint -- right for
+        # a single-volume building, but a multi-part one passes a shared value
+        # instead (see below): sampling per-part lets DEM noise, or a real
+        # slope under a wide footprint, put stacked tiers at different ground
+        # baselines and open a gap where two parts should sit flush. Worst on
+        # a wide landmark like the Eiffel Tower, whose ~125 m footprint spans
+        # real slope -- the antenna mast came out floating above the platform
+        # below it because each was grounded from its own, differently
+        # sampled, patch of terrain.
+        if z_ground is None:
+            gz = terr.elev_xy(np.asarray(poly.exterior.coords)[:, 0],
+                              np.asarray(poly.exterior.coords)[:, 1])
+            ground = float(np.min(gz))
+            z_ground = (ground - terr_min[0]) * S.z + cfg.base_mm
 
         bs = cfg.building_scale
         z0 = z_ground + base_m * S.z * bs - (cfg.embed_mm if base_m <= 0.01 else 0.0)
@@ -2739,6 +2749,17 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
             used_parent += 1
             parent_h, _ = resolve_height(rec, cfg)
 
+            # One ground for every part of this building (see emit's z_ground
+            # docstring): sampled over the parent's own footprint, the widest
+            # thing at grade, rather than letting each part sample its own
+            # patch of the DEM.
+            shared_ground = None
+            if polys:
+                gxy = np.concatenate(
+                    [np.asarray(p.exterior.coords)[:, :2] for p in polys], axis=0)
+                gz = terr.elev_xy(gxy[:, 0], gxy[:, 1])
+                shared_ground = (float(np.min(gz)) - terr_min[0]) * S.z + cfg.base_mm
+
             def _kh(p):
                 h = p.get("height")
                 return float(h) if h else float(p.get("min_height") or 0.0)
@@ -2844,11 +2865,11 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
                     for kp in kpolys:
                         emit(k, kp, kmin, kh, is_top=True,
                              rule=rule, allowed=True, force_spire=True,
-                             center=shared_c)
+                             center=shared_c, z_ground=shared_ground)
                     continue
                 for kp in kpolys:
                     emit(k, kp, kmin, kh, is_top=(k is top_part),
-                         center=shared_c,
+                         center=shared_c, z_ground=shared_ground,
                          rule=rule, allowed=True)
         else:
             h, _src = resolve_height(rec, cfg)
