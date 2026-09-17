@@ -177,22 +177,43 @@ dropped instead. Both counts are in the funnel.
 
 **A multi-part building needs ONE ground, not one per part.** `resolve_floating`
 gets the Z axis right, but a real Eiffel Tower export still came out with the
-antenna mast floating 0.13 mm above the platform below it, and looser seams
-lower down. Cause: `emit()` samples the terrain DEM under *that part's own
-footprint* to find `z_ground` — fine for a single-volume building, wrong for
-one with parts, because the Eiffel Tower's ~125 m footprint crosses real
-elevation change, so each part's own patch of ground differs slightly and
-stacked tiers no longer line up. `build_buildings()` now samples ground once,
-from the PARENT's own footprint (the widest thing at grade), and every part of
-that building shares it via `emit(..., z_ground=shared_ground)`; a
-single-volume building is unaffected, since it only ever had one footprint to
-sample from anyway. Verified on the reported tile: the mast now sits at
-*exactly* the same height as the platform under it (0 mm gap, was 0.13 mm),
-and re-checked the CN Tower still exports clean. The Eiffel Tower still has no
-`landmarks.json` entry — only the CN Tower and Rogers Centre do — so it gets no
-`shared_c` axis anchor or spire merging; what looked like a slanted, barely-
-connected roof was this same ground-sampling drift on a smaller scale, not a
-roof bug, and cleared up with the rest once ground was shared.
+antenna mast reading as floating above the platform below it. Two separate
+bugs stacked here, and fixing only the first was not enough — worth reading
+both if a landmark still looks disconnected after a ground-sampling fix.
+
+*First*: `emit()` samples the terrain DEM under *that part's own footprint*
+to find `z_ground` — fine for a single-volume building, wrong for one with
+parts, because the Eiffel Tower's ~125 m footprint crosses real elevation
+change, so each part's own patch of ground differed slightly and stacked
+tiers did not line up (the mast sat 0.13 mm above the platform). Fixed by
+sampling ground once per building, from the PARENT's own footprint (the
+widest thing at grade), shared by every part via `emit(..., z_ground=
+shared_ground)`. Verified by direct mesh inspection: the mast's bottom and
+the platform's top became bit-for-bit equal.
+
+*Second, found because the report said the pole was STILL disconnected after
+that fix landed*: the platform under the mast is a `roof_shape=dome` part.
+`roof_cap`'s dome/cone/pyramidal/onion shapes narrow to a single point at the
+apex — so even with the Z gap closed to exactly 0, the mast's flat base was
+resting on a mathematical point, not a surface. Watertight, but a near-zero
+contact area reads as "barely connected" (or outright floating, depending on
+the render) regardless of Z alignment — the underlying assumption break is
+that `resolve_floating`'s support test checks plan overlap assuming the
+*whole footprint* is available to support something, when a peaked roof has
+actually narrowed the real cross-section to a sliver by the time it reaches
+that height. `supports_above(items, tol)` (mirrors `resolve_floating`'s own
+overlap test, asking the opposite question — what rests on ME) flags any part
+with something above it; `emit(..., flat_top=True)` skips `roof_cap` entirely
+for a flagged part, regardless of its tagged shape, so it gets a full flat
+top to actually support what is resting on it. Deliberately NOT scoped to
+`landmarks.json` — the Eiffel Tower has no entry there (only the CN Tower and
+Rogers Centre do) — because the condition it targets (something resting
+exactly on a point-peaked roof) essentially never happens on an ordinary
+building; scoping it to landmarks would have just meant adding an entry for
+every future tower this hits. Re-verified the CN Tower's mesh is
+byte-for-byte unchanged (1155 verts, 2302 faces, identical component split)
+— nothing in its legs/shaft/pod/mast stack is a peaked roof with something
+resting on it, so the new check is a no-op there.
 
 **Synthesised tapers are opt-in.** `spire_taper=False` by default. Turning it on
 needles the top of *every* parts-bearing building, which spikes the whole city.

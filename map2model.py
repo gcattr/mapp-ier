@@ -2602,6 +2602,32 @@ def resolve_floating(cfg, items):
     return out, grounded, dropped
 
 
+def supports_above(items, tol):
+    """
+    Which of these parts has another part of the same building resting on it
+    -- same overlap-in-plan test as resolve_floating's support check, just
+    asking the opposite question (does anything sit on ME) rather than (what
+    do I sit on).
+
+    A part in that position needs a flat top even if Overture tags it with a
+    peaked roof (dome, cone, pyramidal, onion): those shapes narrow to a
+    single point at the apex, so resting another part's full-width base
+    there is a razor-thin, near-zero-area contact even once the two are
+    Z-aligned with no gap -- which is what made the Eiffel Tower's antenna
+    mast still read as floating above its cupola after the ground-sharing fix
+    closed the actual gap between them. Returns a set of indices into `items`.
+    """
+    out = set()
+    for i, (_r, polys, _base, top) in enumerate(items):
+        for j, (_r2, polys2, base2, _top2) in enumerate(items):
+            if i == j or base2 < top - tol or base2 > top + tol:
+                continue
+            if any(a.intersects(b) for a in polys for b in polys2):
+                out.add(i)
+                break
+    return out
+
+
 def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
     from shapely.geometry import Point
     from shapely.ops import unary_union
@@ -2627,7 +2653,7 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
 
     def emit(rec, poly, base_m, top_m, is_top=True,
              rule=None, allowed=False, force_spire=False,
-             center=None, z_ground=None):
+             center=None, z_ground=None, flat_top=False):
         nonlocal n_tri_fail, made, tallest
         # z_ground defaults to sampling THIS part's own footprint -- right for
         # a single-volume building, but a multi-part one passes a shared value
@@ -2675,7 +2701,9 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
             pmm = pmm_true
 
         cap = None
-        if cfg.roof_shapes and cfg.lod >= 2 and cfg.roof_mode != "none":
+        if flat_top:
+            pass  # something else stands on this part; see supports_above()
+        elif cfg.roof_shapes and cfg.lod >= 2 and cfg.roof_mode != "none":
             rh = rec.get("roof_height")
             shape = rec.get("roof_shape")
             if shape and shape != "flat":
@@ -2859,18 +2887,21 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
             prepared, g, d = resolve_floating(cfg, prepared)
             n_grounded += g
             n_floating_dropped += d
+            has_support = supports_above(prepared, cfg.floating_tol_m)
 
-            for k, kpolys, kmin, kh in prepared:
+            for idx, (k, kpolys, kmin, kh) in enumerate(prepared):
+                flat_top = idx in has_support
                 if spire_stack and k is base_k:
                     for kp in kpolys:
                         emit(k, kp, kmin, kh, is_top=True,
                              rule=rule, allowed=True, force_spire=True,
-                             center=shared_c, z_ground=shared_ground)
+                             center=shared_c, z_ground=shared_ground,
+                             flat_top=flat_top)
                     continue
                 for kp in kpolys:
                     emit(k, kp, kmin, kh, is_top=(k is top_part),
                          center=shared_c, z_ground=shared_ground,
-                         rule=rule, allowed=True)
+                         rule=rule, allowed=True, flat_top=flat_top)
         else:
             h, _src = resolve_height(rec, cfg)
             mh = float(rec.get("min_height") or 0.0)
