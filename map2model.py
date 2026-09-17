@@ -2701,25 +2701,35 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
             pmm = pmm_true
 
         cap = None
-        if flat_top:
-            pass  # something else stands on this part; see supports_above()
-        elif cfg.roof_shapes and cfg.lod >= 2 and cfg.roof_mode != "none":
+        if cfg.roof_shapes and cfg.lod >= 2 and cfg.roof_mode != "none":
             rh = rec.get("roof_height")
             shape = rec.get("roof_shape")
             if shape and shape != "flat":
-                rh_mm = (float(rh) * S.z) if rh else min(0.35 * (z1 - z0),
-                                                         3.5 * S.z)
                 # Clamp by roof FAMILY. A pyramidal/cone/dome spire really is
                 # mostly roof, so it needs headroom. A gabled or hipped roof
                 # that eats 98% of the building turns the whole volume into a
                 # wedge - which is what a single global clamp did to the city.
                 pointed = shape in ("pyramidal", "cone", "dome", "spherical",
                                     "round", "onion")
-                frac = cfg.roof_height_max_frac if pointed else cfg.ridge_roof_max_frac
-                rh_mm = max(0.15, min(rh_mm, frac * (z1 - z0)))
-                cap = roof_cap(pmm, shape, rh_mm, rec.get("roof_direction"),
-                               cfg.min_feature_mm, mode=cfg.roof_mode,
-                               orientation=rec.get("roof_orientation"))
+                # flat_top only overrides a POINTED shape. Those converge to a
+                # literal zero-width point at the apex, so anything resting on
+                # one has almost no real contact area even at zero Z gap - see
+                # supports_above(). A ridge shape (skillion/gabled/hipped) keeps
+                # a full-width edge or ridge the whole way, so it never had that
+                # problem; forcing it flat too took real, correctly-tapered
+                # roofs (the CN Tower's flared legs among them) down to blocks
+                # for no reason - the exact regression flat_top was supposed
+                # to avoid causing anywhere else in the city.
+                if flat_top and pointed:
+                    pass
+                else:
+                    rh_mm = (float(rh) * S.z) if rh else min(0.35 * (z1 - z0),
+                                                             3.5 * S.z)
+                    frac = cfg.roof_height_max_frac if pointed else cfg.ridge_roof_max_frac
+                    rh_mm = max(0.15, min(rh_mm, frac * (z1 - z0)))
+                    cap = roof_cap(pmm, shape, rh_mm, rec.get("roof_direction"),
+                                   cfg.min_feature_mm, mode=cfg.roof_mode,
+                                   orientation=rec.get("roof_orientation"))
         span = max(pmm.bounds[2] - pmm.bounds[0], pmm.bounds[3] - pmm.bounds[1])
         chunks = robust_pieces(pmm, max(span / 4.0, 0.5))
 

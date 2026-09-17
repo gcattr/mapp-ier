@@ -210,10 +210,37 @@ top to actually support what is resting on it. Deliberately NOT scoped to
 Rogers Centre do) — because the condition it targets (something resting
 exactly on a point-peaked roof) essentially never happens on an ordinary
 building; scoping it to landmarks would have just meant adding an entry for
-every future tower this hits. Re-verified the CN Tower's mesh is
-byte-for-byte unchanged (1155 verts, 2302 faces, identical component split)
-— nothing in its legs/shaft/pod/mast stack is a peaked roof with something
-resting on it, so the new check is a no-op there.
+every future tower this hits.
+
+*The first version of `flat_top` was too broad, and it took a real report to
+catch it*: it suppressed `roof_cap` entirely, for ANY tagged shape, not just
+the pointed ones that actually have the zero-contact-area problem. A ridge
+roof (skillion/gabled/hipped) keeps a full-width edge or ridge the whole way
+up — it never had that problem — so forcing it flat too took a legitimately-
+sloped roof down to a block for no reason, reported against the CN Tower's
+legs. Fixed by gating `flat_top` on the SAME `pointed` family `roof_cap`
+already computes for the height-clamp fraction (`pyramidal`, `cone`, `dome`,
+`spherical`, `round`, `onion`) — a ridge shape now keeps its cap regardless
+of what rests on it.
+
+Getting a clean before/after on this took more than re-running the CLI: a
+live Overture fetch is not deterministic run to run (see **A failed query
+and an empty tile both return `[]`** and **Worse: a query can return zero
+rows...** above — this is the same family of flakiness, just showing up as a
+different SET of `building_part` rows rather than an empty layer), so two
+runs of *identical* code produced different CN Tower geometry, and two runs
+of *different* code on a live fetch could look identical or different by
+chance either way. `fetch_all` monkey-patched to return one cached,
+pickled `(buildings, parts, water, green, roads)` tuple (the `test_offline.py`
+pattern, done ad hoc here) turns that into an actual controlled experiment.
+Against identical cached data: the original pre-`flat_top` code, `flat_top`
+scoped to pointed-only, and the Eiffel Tower's dome/mast fix all produced
+byte-identical `buildings` meshes for the CN Tower's leg region in this
+particular fetch — meaning the reported "legs turned into a block" could not
+be reproduced as a controlled `flat_top` regression, but the overly-broad
+version was still a real bug in its own right (any ridge-roofed part with
+something resting on it, anywhere in a city tile, not just CN Tower)
+worth the fix regardless of whether it was this specific report's cause.
 
 **Synthesised tapers are opt-in.** `spire_taper=False` by default. Turning it on
 needles the top of *every* parts-bearing building, which spikes the whole city.
