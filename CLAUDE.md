@@ -189,7 +189,13 @@ tiers did not line up (the mast sat 0.13 mm above the platform). Fixed by
 sampling ground once per building, from the PARENT's own footprint (the
 widest thing at grade), shared by every part via `emit(..., z_ground=
 shared_ground)`. Verified by direct mesh inspection: the mast's bottom and
-the platform's top became bit-for-bit equal.
+the platform's top became bit-for-bit equal. The shared value is the
+`min()` over the parent footprint, so it is at or below every part that sits
+inside that outline: parts settle a little INTO the terrain rather than above
+it, which is the safe direction to be wrong in. A part that overhangs the
+parent outline over lower ground is the one case that could go the other way;
+not seen in practice, and `resolve_floating` does not check terrain-relative
+float, so it would not be caught if it happened.
 
 *Second, found because the report said the pole was STILL disconnected after
 that fix landed*: the platform under the mast is a `roof_shape=dome` part.
@@ -223,24 +229,38 @@ already computes for the height-clamp fraction (`pyramidal`, `cone`, `dome`,
 `spherical`, `round`, `onion`) — a ridge shape now keeps its cap regardless
 of what rests on it.
 
-Getting a clean before/after on this took more than re-running the CLI: a
-live Overture fetch is not deterministic run to run (see **A failed query
-and an empty tile both return `[]`** and **Worse: a query can return zero
-rows...** above — this is the same family of flakiness, just showing up as a
-different SET of `building_part` rows rather than an empty layer), so two
-runs of *identical* code produced different CN Tower geometry, and two runs
-of *different* code on a live fetch could look identical or different by
-chance either way. `fetch_all` monkey-patched to return one cached,
-pickled `(buildings, parts, water, green, roads)` tuple (the `test_offline.py`
-pattern, done ad hoc here) turns that into an actual controlled experiment.
-Against identical cached data: the original pre-`flat_top` code, `flat_top`
-scoped to pointed-only, and the Eiffel Tower's dome/mast fix all produced
-byte-identical `buildings` meshes for the CN Tower's leg region in this
-particular fetch — meaning the reported "legs turned into a block" could not
-be reproduced as a controlled `flat_top` regression, but the overly-broad
-version was still a real bug in its own right (any ridge-roofed part with
-something resting on it, anywhere in a city tile, not just CN Tower)
-worth the fix regardless of whether it was this specific report's cause.
+**The CN Tower's legs ARE a roof.** This is the fact that makes the above
+make sense, and not knowing it sent a whole debugging session down the wrong
+path. Overture models the three legs as three parts, each `0 → 330 m`, each
+tagged `roof_shape=skillion` with `roof_height=330` — the roof IS the part —
+at `roof_direction` 45° / 165° / 285°, i.e. 120° apart. So the leg's entire
+splayed silhouette comes from a RIDGE-family roof cap whose height is
+governed by `--max-ridge-frac` (`ridge_roof_max_frac`, 0.98), not from any
+taper, profile or `landmarks.json` rule. Suppress that cap and a leg is a
+plain 330 m box. That is exactly what the first `flat_top` did — a part
+starting at exactly 330 m rests on the legs, so `supports_above()` flagged
+all three — and it is why the report described it as "instead of a nice
+slope it's a block," and correctly fingered `--max-ridge-frac` as what the
+slope depends on.
+
+**A replay harness that does not mirror the real flags proves nothing.**
+The controlled test for the above (monkey-patch `fetch_all` to return one
+cached, pickled `(buildings, parts, water, green, roads)` tuple — the
+`test_offline.py` pattern) is the right tool, and it is worth building,
+because a live Overture fetch is not deterministic run to run (same family
+of flakiness as **A failed query and an empty tile both return `[]`**, just
+showing up as a different SET of `building_part` rows). But the first
+version of that harness built its `Config` without `roof_mode='all'`, and
+the default `symmetric` suppresses EVERY skillion cap on its own — so the
+legs came out as blocks in *every* version, the regression vanished, and
+the conclusion drawn was the false "cannot reproduce it; must be fetch
+variance." With `roof_mode='all'` and `ridge_roof_max_frac=0.98` (what the
+console and the copied command actually pass) the difference is immediate
+and total: blanket `flat_top` → `cap_made=False` on all three legs, meshes
+measure `width@top == width@bottom`; pointed-only `flat_top` →
+`cap_made=True`, meshes measure 11.09 mm at the base tapering to 3.77 mm at
+the top. Mirror the real command's flags in the harness, or it is testing a
+configuration no buyer ever gets.
 
 **Synthesised tapers are opt-in.** `spire_taper=False` by default. Turning it on
 needles the top of *every* parts-bearing building, which spikes the whole city.
