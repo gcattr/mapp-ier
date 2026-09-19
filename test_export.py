@@ -653,7 +653,7 @@ def _fetch_all_parallel():
     M.fetch = fake_fetch
     M.resolve_release = lambda cfg: "test"
     try:
-        cfg = M.Config(bbox=(0, 0, 1, 1), verbose=False)
+        cfg = M.Config(bbox=(0, 0, 1, 1), verbose=False, osm_raceways=False)
         b, parts, water, green, roads = M.fetch_all_overture(cfg)
     finally:
         M._con, M.fetch, M.resolve_release = old
@@ -661,11 +661,13 @@ def _fetch_all_parallel():
     assert b and parts and water and roads, (b, parts, water, roads)
     # greenery is two Overture types concatenated, not one
     assert len(green) == 2, green
+    # the 7th scan is the mapped bridge piers (base/infrastructure)
     assert sorted(seen) == sorted(["building", "building_part", "water",
-                                   "land_cover", "land_use", "segment"]), seen
+                                   "land_cover", "land_use", "segment",
+                                   "infrastructure"]), seen
     assert len(threads) > 1, "the layers ran one after another, not at once"
-    assert con.cursors == 6, f"{con.cursors} cursors for 6 layers"
-    assert con.closed_cursors == 6, "a cursor was leaked"
+    assert con.cursors == 7, f"{con.cursors} cursors for 7 layers"
+    assert con.closed_cursors == 7, "a cursor was leaked"
     assert con.closed, "the connection was left open"
 
 
@@ -688,7 +690,7 @@ def _fetch_all_sequential():
     M.resolve_release = lambda cfg: "test"
     try:
         M.fetch_all_overture(M.Config(bbox=(0, 0, 1, 1), fetch_workers=1,
-                                      verbose=False))
+                                      verbose=False, osm_raceways=False))
     finally:
         M._con, M.fetch, M.resolve_release = old
     assert len(threads) == 1, "fetch_workers=1 still spawned threads"
@@ -710,13 +712,111 @@ def _lod1_skips_parts():
     M.fetch = fake_fetch
     M.resolve_release = lambda cfg: "test"
     try:
-        M.fetch_all_overture(M.Config(bbox=(0, 0, 1, 1), lod=1, verbose=False))
+        M.fetch_all_overture(M.Config(bbox=(0, 0, 1, 1), lod=1, verbose=False,
+                                      osm_raceways=False))
     finally:
         M._con, M.fetch, M.resolve_release = old
     assert "building_part" not in asked, "LOD1 still paid for a parts scan"
 
 
 check("LOD1 does not scan for building parts", _lod1_skips_parts)
+
+
+def _race_tracks_join_the_roads():
+    # Overture has no raceways - the Spa circuit tile printed its access roads
+    # and not the circuit - so they come from OSM and ride in with the roads.
+    # And a car park's aisles are clutter, not roads.
+    con = _FakeCon()
+
+    def fake_fetch(cfg, cur, release, theme, typ, cols, where=""):
+        if typ != "segment":
+            return []
+        assert "'service'" in where and "'track'" in where, \
+            "service and track roads are filtered out again: " + where
+        return [{"class": "service", "subclass": None},
+                {"class": "service", "subclass": "parking_aisle"}]
+
+    old = (M._con, M.fetch, M.resolve_release, M.fetch_osm_raceways)
+    M._con = lambda cfg: con
+    M.fetch = fake_fetch
+    M.resolve_release = lambda cfg: "test"
+    M.fetch_osm_raceways = lambda cfg: [{"class": "raceway", "subclass": None}]
+    try:
+        roads = M.fetch_all_overture(M.Config(bbox=(0, 0, 1, 1), verbose=False))[4]
+    finally:
+        M._con, M.fetch, M.resolve_release, M.fetch_osm_raceways = old
+    classes = sorted(r["class"] for r in roads)
+    assert classes == ["raceway", "service"], classes
+
+
+check("race tracks come in from OSM; car-park aisles stay out", _race_tracks_join_the_roads)
+
+
+def _fetch_cache_replays_only_clean_fetches():
+    calls = []
+
+    def fake_all(cfg):
+        calls.append(1)
+        return ([{"id": "b"}], [], [], [], [{"id": "r"}])
+
+    old = M.fetch_all
+    M.fetch_all = fake_all
+    M.FETCH_CACHE.clear()
+    try:
+        import contextlib
+        cfg = M.Config(bbox=(0, 0, 1, 1), fetch_cache=True)
+        with contextlib.redirect_stderr(io.StringIO()):
+            a = M.fetch_cached(cfg)
+            a[0][0]["id"] = "mutated"           # run() may annotate rows
+            b = M.fetch_cached(M.Config(bbox=(0, 0, 1, 1), fetch_cache=True,
+                                        building_scale=3.0))
+        assert len(calls) == 1, "a same-area rebuild downloaded again"
+        assert b[0][0]["id"] == "b", "the cache handed out a row a build had changed"
+        # greenery switched off is still the same area: served from the fuller
+        # fetch, with the unwanted layer emptied, not downloaded again
+        with contextlib.redirect_stderr(io.StringIO()):
+            c = M.fetch_cached(M.Config(bbox=(0, 0, 1, 1), fetch_cache=True,
+                                        want_greenery=False, want_buildings=False))
+        assert len(calls) == 1, "a rebuild with fewer layers downloaded again"
+        assert c[0] == [] and c[4], "unwanted layers leaked through / wanted ones lost"
+        M.FETCH_ERRORS.append(("x", "boom"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            M.fetch_cached(M.Config(bbox=(0, 0, 2, 2), fetch_cache=True))
+        del M.FETCH_ERRORS[:]
+        assert len(M.FETCH_CACHE) == 1, "a failed fetch was cached"
+    finally:
+        M.fetch_all = old
+        M.FETCH_CACHE.clear()
+        del M.FETCH_ERRORS[:]
+
+
+check("a same-area rebuild reuses the fetch; a failed one is never cached",
+      _fetch_cache_replays_only_clean_fetches)
+
+
+def _stac_picks_only_overlapping_files():
+    class C:
+        def execute(self, sql):
+            class R:
+                def fetchall(_):
+                    return [("segment", 0, 0, 10, 10, "s3://a"),
+                            ("segment", 20, 20, 30, 30, "s3://b"),
+                            ("building", 0, 0, 10, 10, "s3://c")]
+            return R()
+    M._STAC_INDEX.clear()
+    try:
+        cfg = M.Config(bbox=(5, 5, 6, 6))
+        assert M.stac_files(cfg, C(), "rel", "segment") == ["s3://a"]
+        assert M.stac_files(cfg, C(), "rel", "land_use") is None, \
+            "a type missing from the index must fall back to the glob"
+        assert M.stac_files(M.Config(bbox=(5, 5, 6, 6), use_stac_index=False),
+                            C(), "rel", "segment") is None
+    finally:
+        M._STAC_INDEX.clear()
+
+
+check("the STAC index narrows a scan to the files that cover the tile",
+      _stac_picks_only_overlapping_files)
 
 
 # ------------------------------------------------------------- floating parts
@@ -1008,6 +1108,410 @@ def _output_routing():
 
 
 check("a bare name routes into 3Dmodels/<name>/", _output_routing)
+
+
+# ---------------------------------------------------------- layer hierarchy
+print("\nlayers do not fight:")
+
+# A ~700 m tile near Spa: a forest over the whole middle, a road straight
+# through it, a building sitting in the forest beside the road. Flat terrain
+# (cfg.terrain=False) and a stubbed fetch, so run() is fully offline.
+_BB = (5.960, 50.430, 5.970, 50.436)
+
+
+def _hier_rows():
+    from shapely.geometry import LineString, box
+    W, S, E, N = _BB
+    forest = box(W + 0.001, S + 0.001, E - 0.001, N - 0.001)
+    road = LineString([(W, (S + N) / 2), (E, (S + N) / 2)])
+    cy = (S + N) / 2 + 0.0008
+    bldg = box(5.964, cy, 5.9646, cy + 0.0004)
+    buildings = [{"id": "b1", "height": 12.0, "min_height": None, "num_floors": None,
+                  "roof_shape": None, "roof_height": None, "roof_direction": None,
+                  "roof_orientation": None, "has_parts": False, "subtype": None,
+                  "class": None, "names": None, "wkb": bldg.wkb}]
+    green = [{"id": "g1", "subtype": "forest", "wkb": forest.wkb}]
+    roads = [{"id": "r1", "subtype": "road", "class": "primary", "subclass": None,
+              "wkb": road.wkb}]
+    return buildings, [], [], green, roads
+
+
+def _run_hierarchy(**kw):
+    """run() the synthetic tile; return {label: polys} handed to build_drape."""
+    seen = {}
+    real_drape, real_fetch = M.build_drape, M.fetch_all
+
+    def spy(cfg, proj, terr, S, polys, *a, **k):
+        seen[k.get("label", "")] = list(polys)
+        return real_drape(cfg, proj, terr, S, polys, *a, **k)
+
+    M.build_drape, M.fetch_all = spy, (lambda cfg: _hier_rows())
+    try:
+        cfg = M.Config(bbox=_BB, size_mm=100.0, terrain=False, water_in_frame=True,
+                       frame=True, split=True, box=False, verbose=False,
+                       osm_raceways=False, **kw)
+        out = os.path.join(tempfile.mkdtemp(), "hier.3mf")
+        import contextlib
+        with contextlib.redirect_stderr(io.StringIO()):
+            M.run(cfg, out)
+        assert os.path.exists(out), "no plate written"
+    finally:
+        M.build_drape, M.fetch_all = real_drape, real_fetch
+    return seen
+
+
+def _area_overlap(a, b):
+    from shapely.ops import unary_union
+    if not a or not b:
+        return 0.0
+    return unary_union(a).intersection(unary_union(b)).area
+
+
+def _roads_are_not_buried_in_greenery():
+    seen = _run_hierarchy()
+    g, r = seen.get("draping greenery"), seen.get("draping roads")
+    assert g and r, f"expected greenery and roads, got {sorted(seen)}"
+    ov = _area_overlap(g, r)
+    # the Spa bug: 98% of the road footprint sat under 0.8 mm-proud greenery
+    assert ov < 1.0, f"greenery still covers {ov:.0f} m2 of road"
+
+
+check("roads are cut out of the greenery, not buried under it",
+      _roads_are_not_buried_in_greenery)
+
+
+def _buildings_cut_what_is_under_them():
+    from shapely.geometry import box
+    seen = _run_hierarchy()
+    g = seen["draping greenery"]
+    from shapely.ops import unary_union
+    gu = unary_union(g)
+    # the building footprint, in the same projected metres run() used
+    proj = M.Projector(_BB)
+    cy = (_BB[1] + _BB[3]) / 2 + 0.0008
+    bp = proj.geom(box(5.964, cy, 5.9646, cy + 0.0004))
+    assert gu.intersection(bp).area < 1.0, "greenery still fills the building's footprint"
+
+
+check("a building cuts the greenery it stands on", _buildings_cut_what_is_under_them)
+
+
+def _an_off_layer_cuts_nothing():
+    seen = _run_hierarchy(want_roads=False)
+    g = seen.get("draping greenery")
+    assert g, "greenery missing"
+    base = _run_hierarchy(layer_hierarchy=False)["draping greenery"]
+    # roads off: the only cut left is the building, so the greenery is nearly
+    # whole - not scored with a road-shaped hole nobody will print into
+    lost = sum(p.area for p in base) - sum(p.area for p in g)
+    assert lost < 2000.0, f"greenery lost {lost:.0f} m2 to a layer that is off"
+
+
+check("a switched-off layer leaves no hole in the one below", _an_off_layer_cuts_nothing)
+
+
+# ------------------------------------------------------------------ bridges
+print("\nbridges and tunnels:")
+
+
+def _split_levels():
+    from shapely.geometry import LineString
+    ln = LineString([(0, 0), (100, 0)])
+    # Westminster Bridge's shape: bridge over the first quarter at level 1
+    rec = {"road_flags": [{"values": ["is_bridge"], "between": [0.0, 0.25]},
+                          {"values": ["is_tunnel"], "between": [0.6, 0.8]}],
+           "level_rules": [{"value": 1, "between": [0.0, 0.25]}]}
+    got = [(k, lv, round(g.length)) for k, lv, g in M.split_road_levels(ln, rec)]
+    assert got == [("bridge", 1, 25), ("ground", 0, 35), ("tunnel", 0, 20),
+                   ("ground", 0, 20)], got
+    whole = M.split_road_levels(ln, {"road_flags": [{"values": ["is_bridge"],
+                                                     "between": None}]})
+    assert [(k, lv) for k, lv, _ in whole] == [("bridge", 1)], whole
+    assert M.split_road_levels(ln, {}) [0][0] == "ground"
+
+
+check("a segment splits into its ground, bridge and tunnel stretches", _split_levels)
+
+
+def _bridge_spans_the_water():
+    from shapely.geometry import LineString, box
+    W, S, E, N = _BB
+    my = (S + N) / 2
+    river = box(W, my - 0.0006, E, my + 0.0006)              # ~130 m wide
+    road = LineString([((W + E) / 2, S), ((W + E) / 2, N)])  # crosses it
+    # the middle 40% of the road is the bridge; a tunnel stretch near the end
+    rows = ([], [], [{"id": "w", "subtype": "river", "class": "river",
+                      "wkb": river.wkb}], [],
+            [{"id": "r", "subtype": "road", "class": "primary", "subclass": None,
+              "road_flags": [{"values": ["is_bridge"], "between": [0.3, 0.7]},
+                             {"values": ["is_tunnel"], "between": [0.9, 1.0]}],
+              "level_rules": [{"value": 1, "between": [0.3, 0.7]}],
+              "wkb": road.wkb}])
+    got = {}
+    real_b, real_f = M.build_bridges, M.fetch_all
+
+    def spy(*a, **k):
+        got["mesh"] = real_b(*a, **k)
+        got["n"] = len(a[4])
+        return got["mesh"]
+
+    M.build_bridges, M.fetch_all = spy, (lambda cfg: rows)
+    try:
+        import contextlib
+        cfg = M.Config(bbox=_BB, size_mm=100.0, terrain=False, water_in_frame=True,
+                       frame=True, split=True, box=False, verbose=False,
+                       osm_raceways=False)
+        with contextlib.redirect_stderr(io.StringIO()):
+            M.run(cfg, os.path.join(tempfile.mkdtemp(), "bridge.3mf"))
+    finally:
+        M.build_bridges, M.fetch_all = real_b, real_f
+    assert got.get("n") == 1, f"expected one bridge stretch, got {got.get('n')}"
+    V, F = got["mesh"]
+    # the river is ~13 mm wide at this scale, centred on y=0: the deck must be
+    # there, standing clear of the water plate, not cut away with the river
+    over = V[np.abs(V[:, 1]) < 3.0]
+    assert len(over) and over[:, 2].max() > M.Config().base_mm + 1.0, \
+        "no deck over the river"
+    # and at least one pier, inside the river, reaching down to the water
+    # plate (z = 0)
+    wet = V[np.abs(V[:, 1]) < 9.0]
+    assert (np.abs(wet[:, 2]) < 1e-6).any(), "no pier down to the water plate"
+    # every edge shared by exactly two faces: each deck and pier is closed
+    import trimesh
+    assert trimesh.Trimesh(V, F, process=False).is_watertight, "a deck or pier leaks"
+
+
+check("a bridge keeps its deck over the river, on piers", _bridge_spans_the_water)
+
+
+def _short_bridge_stays_a_road():
+    # a culvert shorter than the road is wide used to vanish, leaving a gap
+    from shapely.geometry import LineString
+    W, S, E, N = _BB
+    road = LineString([(W, (S + N) / 2), (E, (S + N) / 2)])
+    rows = ([], [], [], [], [{"id": "r", "subtype": "road", "class": "primary",
+             "subclass": None, "wkb": road.wkb,
+             "road_flags": [{"values": ["is_bridge"], "between": [0.5, 0.505]}],
+             "level_rules": [{"value": 1, "between": [0.5, 0.505]}]}])
+    seen = {}
+    real, old = M.build_drape, M.fetch_all
+
+    def spy(cfg, proj, terr, S_, polys, *a, **k):
+        seen[k.get("label", "")] = list(polys)
+        return real(cfg, proj, terr, S_, polys, *a, **k)
+
+    M.build_drape, M.fetch_all = spy, (lambda cfg: rows)
+    try:
+        import contextlib
+        with contextlib.redirect_stderr(io.StringIO()):
+            M.run(M.Config(bbox=_BB, size_mm=100.0, terrain=False, water_in_frame=True,
+                           frame=True, split=True, box=False, verbose=False,
+                           osm_raceways=False), os.path.join(tempfile.mkdtemp(), "c.3mf"))
+    finally:
+        M.build_drape, M.fetch_all = real, old
+    from shapely.ops import unary_union
+    u = unary_union(seen["draping roads"])
+    assert u.geom_type == "Polygon", f"the road has a gap: {u.geom_type}"
+
+
+check("a bridge shorter than the road is wide stays road, not a gap",
+      _short_bridge_stays_a_road)
+
+
+# --------------------------------------------------------------- name plate
+print("\nthe name plate:")
+
+
+def _letters_print_on_a_04_nozzle():
+    # every character the console offers, at the cap height the console's
+    # fixed 6 mm frame gives: nothing narrower than two perimeters survives
+    cfg = M.Config(frame_width_mm=6.0)
+    cap = M.nameplate_cap_mm(cfg)
+    r = cfg.min_feature_mm / 2.0
+    for ch in M.NAMEPLATE_CHARS.replace(" ", ""):
+        for g in M.text_polys(ch, cap):
+            thin = g.difference(g.buffer(-r, join_style=2).buffer(r, join_style=2))
+            assert thin.area <= 0.04 * g.area, \
+                f"{ch!r}: {thin.area / g.area:.0%} of it is under {cfg.min_feature_mm} mm"
+
+
+check("every letter is thick enough for a 0.4 mm nozzle", _letters_print_on_a_04_nozzle)
+
+
+def _long_name_refused_before_download():
+    calls = []
+    old = M.fetch_all
+    M.fetch_all = lambda cfg: calls.append(1) or ([], [], [], [], [])
+    try:
+        M.run(M.Config(bbox=_BB, size_mm=100.0, frame_width_mm=6.0,
+                       nameplate="W" * 30, terrain=False, osm_raceways=False), "x.3mf")
+        raise AssertionError("an over-long name was accepted")
+    except ValueError as e:
+        assert "shorten" in str(e), e
+    finally:
+        M.fetch_all = old
+    assert not calls, "it downloaded the tile before refusing the name"
+    M.fetch_all = lambda cfg: calls.append(1) or ([], [], [], [], [])
+    try:
+        M.run(M.Config(bbox=_BB, size_mm=100.0, tile_shape="hex", nameplate="SPA",
+                       terrain=False, osm_raceways=False), "x.3mf")
+        raise AssertionError("a name on a hex tile was accepted")
+    except ValueError as e:
+        assert "square" in str(e), e
+    finally:
+        M.fetch_all = old
+    assert not calls, "a hex-tile name was only refused after the download"
+    try:
+        M.nameplate_clean("café")
+        raise AssertionError("lowercase accent accepted")
+    except ValueError:
+        pass
+    assert M.nameplate_clean("  spa   francorchamps ") == "SPA FRANCORCHAMPS"
+
+
+check("a name that will not fit is refused before any download",
+      _long_name_refused_before_download)
+
+
+def _name_follows_the_frame_colour():
+    cfg = M.Config(filaments={"frame": "basic_blue"})
+    assert M.filament_of(cfg, "name") == M.filament_of(cfg, "frame")
+    cfg = M.Config(filaments=M.parse_filaments("frame=basic_black,name=basic_red"))
+    assert M.filament_of(cfg, "name") == M.FILAMENTS["basic_red"]
+
+
+check("the name prints in the frame colour unless one is picked",
+      _name_follows_the_frame_colour)
+
+
+def _cover_is_notched_over_the_name():
+    import trimesh
+    shape = _square(100.0)
+
+    def vol(**kw):
+        cfg = M.Config(size_mm=100.0, frame_width_mm=6.0, box_cube=False,
+                       nameplate="SPA", **kw)
+        _, notch = M.nameplate_layout(cfg, shape)
+        l, r = M.build_box(cfg, shape, 20.0, notch=notch)
+        return sum(abs(trimesh.Trimesh(*vf, process=False).volume) for vf in (l, r)), notch
+
+    plain = sum(abs(trimesh.Trimesh(*vf, process=False).volume)
+                for vf in M.build_box(M.Config(size_mm=100.0, frame_width_mm=6.0,
+                                               box_cube=False), shape, 20.0))
+    notched, notch = vol()
+    whole, _ = vol(nameplate_rib="none")
+    cfg = M.Config()
+    most = notch.area * cfg.cover_lip_thickness_mm * 1.2
+    assert 0 < plain - notched < most, (plain, notched, most)
+    assert plain - whole > plain - notched, "rib=none removed no more than a notch"
+    # the notch sits on the front (s) side only
+    assert notch.bounds[3] < -50.0 + 1e-6, notch.bounds
+
+
+check("the cover rib is cut away over the name, and only there",
+      _cover_is_notched_over_the_name)
+
+
+def _console_measures_names_like_the_exporter():
+    # The console stops a buyer typing a name that will not fit; the exporter
+    # refuses one. If their tables drift, a name the page allowed is refused
+    # when the seller runs the order days later.
+    html = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "map2model-console.html"), encoding="utf-8").read()
+    adv = json.loads(re.search(r"const PLATE_ADV = (\{.*?\});", html, re.S).group(1))
+    assert adv == M.nameplate_advances(), "PLATE_ADV no longer matches the font"
+    chars = re.search(r'const PLATE_CHARS = "(.*?)";', html).group(1)
+    chars = chars.encode().decode("unicode_escape")
+    assert chars == M.NAMEPLATE_CHARS, (chars, M.NAMEPLATE_CHARS)
+    consts = re.search(r"const PLATE = \{capUnits:(\d+), track:([\d.]+), "
+                       r"thicken:([\d.]+), corner:(\d+)\}", html)
+    assert int(consts.group(1)) == M._font()["OS/2"].sCapHeight
+    assert float(consts.group(2)) == M.NAMEPLATE_TRACK
+    assert float(consts.group(3)) == M.NAMEPLATE_THICKEN
+    assert float(consts.group(4)) == M.Config().nameplate_corner_mm
+
+
+check("the console measures a name exactly as the exporter does",
+      _console_measures_names_like_the_exporter)
+
+
+# ----------------------------------------------------------------- rotation
+print("\na rotated tile:")
+
+
+def _projector_round_trips():
+    P = M.Projector(_BB, 30.0)
+    lon, lat = 5.9632, 50.4331
+    x, y = P.xy(lon, lat)
+    lon2, lat2 = P.to_lonlat(x, y)
+    assert abs(lon2 - lon) < 1e-9 and abs(lat2 - lat) < 1e-9, (lon2, lat2)
+    # the fetch envelope of a turned square is wider than the square itself
+    e = P.envelope_lonlat()
+    assert e[0] < _BB[0] and e[2] > _BB[2] and e[1] < _BB[1] and e[3] > _BB[3], e
+
+
+check("the rotated projection round-trips and widens the fetch", _projector_round_trips)
+
+
+def _rotation_is_invariant():
+    """The same scene turned 30 deg clockwise, on a tile turned 30 deg, with
+    its roofs turned 30 deg, must print exactly like the unturned one - which
+    also proves roof:direction is corrected for the turn."""
+    from shapely.geometry import Polygon, LineString
+    from shapely.affinity import rotate
+    P0 = M.Projector(_BB)
+    bldg_m = Polygon([(-60, 20), (40, 20), (40, 60), (-60, 60)])
+    road_m = LineString([(-300, -40), (300, -40)])
+
+    def rows(theta):
+        def ll(g):
+            g = rotate(g, -theta, origin=(0, 0))          # clockwise on the map
+            from shapely.ops import transform
+            return transform(lambda x, y, z=None: P0.to_lonlat(x, y), g)
+        return ([{"id": "b", "height": 12.0, "min_height": None, "num_floors": None,
+                  "roof_shape": "skillion", "roof_height": 6.0,
+                  "roof_direction": (90.0 + theta) % 360, "roof_orientation": None,
+                  "has_parts": False, "subtype": None, "class": None, "names": None,
+                  "wkb": ll(bldg_m).wkb}], [], [], [],
+                [{"id": "r", "subtype": "road", "class": "primary", "subclass": None,
+                  "wkb": ll(road_m).wkb}])
+
+    def build(theta):
+        got = {}
+        old = M.fetch_all
+        M.fetch_all = lambda cfg: rows(theta)
+        try:
+            import contextlib
+            cfg = M.Config(bbox=_BB, size_mm=100.0, terrain=False, water_in_frame=True,
+                           frame=True, split=True, box=False, verbose=False,
+                           osm_raceways=False, roof_mode="all", rotate_deg=theta)
+            out = os.path.join(tempfile.mkdtemp(), "rot.3mf")
+            with contextlib.redirect_stderr(io.StringIO()):
+                M.run(cfg, out)
+            import serve
+            for L in serve.mesh_from_3mf(out):
+                got[L["name"]] = np.array(L["positions"]).reshape(-1, 3)
+        finally:
+            M.fetch_all = old
+        return got
+
+    a, b = build(0.0), build(30.0)
+    for layer in ("buildings", "roads"):
+        pa, pb = a[layer], b[layer]
+        lo = np.abs(pa.min(0) - pb.min(0)).max()
+        hi = np.abs(pa.max(0) - pb.max(0)).max()
+        assert lo < 0.05 and hi < 0.05, f"{layer} moved: {pa.min(0)} {pb.min(0)} / {pa.max(0)} {pb.max(0)}"
+    # the skillion's high side is the same side in both
+    ta, tb = a["buildings"], b["buildings"]
+    # (x AND y: turned 30 deg, the high edge becomes a single corner that can
+    # share its x with the true edge's midpoint)
+    ha = ta[ta[:, 2] > ta[:, 2].max() - 0.01][:, :2].mean(0)
+    hb = tb[tb[:, 2] > tb[:, 2].max() - 0.01][:, :2].mean(0)
+    assert np.abs(ha - hb).max() < 0.2, f"the roof turned with the tile: {ha} vs {hb}"
+
+
+check("a turned scene on a turned tile prints exactly like the original",
+      _rotation_is_invariant)
 
 
 print("\n" + "-" * 52)

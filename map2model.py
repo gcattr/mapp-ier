@@ -223,6 +223,10 @@ def filament_of(cfg, layer):
         # terrain_2..terrain_5: a pick if the buyer made one, else the ramp
         key = (cfg.filaments or {}).get(layer) or TERRAIN_RAMP[bi - 1]
         return FILAMENTS.get(key) or FILAMENTS[TERRAIN_RAMP[bi - 1]]
+    if layer == "name" and not (cfg.filaments or {}).get("name"):
+        # the name plate prints in the frame's colour unless the buyer picked
+        # one - then slot_map() shares the frame's slot, no extra swap
+        return filament_of(cfg, "frame")
     key = (cfg.filaments or {}).get(layer) or DEFAULT_FILAMENTS.get(layer)
     return FILAMENTS.get(key) or FILAMENTS[DEFAULT_FILAMENTS.get(layer, "basic_gray")]
 
@@ -242,7 +246,8 @@ def parse_filaments(spec):
         if "=" not in chunk:
             raise ValueError(f"--filaments: expected layer=filament, got {chunk!r}")
         layer, key = (x.strip() for x in chunk.split("=", 1))
-        if layer not in DEFAULT_FILAMENTS and not _band_index(layer):
+        if layer not in DEFAULT_FILAMENTS and not _band_index(layer) \
+                and layer != "name":
             raise ValueError(f"--filaments: unknown layer {layer!r}; "
                              f"pick from {', '.join(sorted(DEFAULT_FILAMENTS))}"
                              f" (or terrain_2..terrain_5 for elevation bands)")
@@ -385,15 +390,56 @@ class Config:
     # Overture scans run at once; the wall time becomes the slowest query
     # rather than the sum of six. 1 = sequential.
     fetch_workers: int = 6
+    # Keep fetched Overture rows in FETCH_CACHE so a rebuild of the SAME area
+    # (a new building stretch, print size, frame...) skips the minutes of S3.
+    # serve.py turns it on; a one-shot CLI run gains nothing from it.
+    fetch_cache: bool = False
+    # Pick the parquet files to read from Overture's STAC index instead of
+    # globbing every file of a type. Falls back to the glob if the index fails.
+    use_stac_index: bool = True
     road_width_m: dict = field(default_factory=lambda: {
         "motorway": 22.0, "trunk": 18.0, "primary": 15.0, "secondary": 12.0,
         "tertiary": 10.0, "residential": 8.0, "living_street": 7.0,
         "unclassified": 8.0, "service": 5.0, "pedestrian": 5.0,
         "footway": 3.0, "steps": 3.0, "path": 3.0, "cycleway": 3.0,
+        "track": 4.0, "unknown": 6.0, "raceway": 14.0,
     })
+    # `service` and `track` matter outside a downtown grid: around the Spa
+    # circuit 200 of 274 Overture segments were one or the other, so without
+    # them the tile printed two roads. Car-park aisles and driveways are
+    # dropped separately (road_skip_subclasses) - they are clutter, not roads.
     road_classes: tuple = ("motorway", "trunk", "primary", "secondary",
                            "tertiary", "residential", "living_street",
-                           "unclassified", "pedestrian")
+                           "unclassified", "pedestrian", "service", "track",
+                           "unknown")
+    road_skip_subclasses: tuple = ("parking_aisle", "driveway", "drive_through")
+    # Overture has no race tracks - OSM `highway=raceway` never reaches its
+    # transportation theme - so a circuit tile prints its access roads and not
+    # the circuit. Fill them in from OSM (Overpass), best effort: an Overpass
+    # outage only costs the raceway, never the build.
+    osm_raceways: bool = True
+    # BRIDGES. Overture flags the bridged stretch of a segment (`road_flags`
+    # is_bridge over a `between` fraction) and its z-order (`level_rules`).
+    # Without this a bridge over water was cut away with the water and a
+    # tunnel was drawn on the surface. A bridge becomes a deck ramping up to
+    # level x bridge_level_mm above its abutments, with piers down to the
+    # water plate (or the ground) every bridge_pier_mm - printed as part of
+    # the roads object, so no extra filament.
+    # NAME PLATE: raised text on the frame's top border, on one side
+    # (n/e/s/w, "up" pointing into the tile). The cover's rib is notched over
+    # it ("notch") or left off that whole side ("none"); the corners keep
+    # nameplate_corner_mm of rib each way so the frame is still held.
+    # degrees CLOCKWISE the tile is turned on the map (0 = north up)
+    rotate_deg: float = 0.0
+    nameplate: str = ""
+    nameplate_side: str = "s"
+    nameplate_rib: str = "notch"
+    nameplate_mm: float = 0.6          # how far the letters stand proud
+    nameplate_corner_mm: float = 20.0
+    bridges: bool = True
+    bridge_level_mm: float = 1.5
+    bridge_deck_mm: float = 1.0
+    bridge_pier_mm: float = 15.0
 
     # buildings
     default_floor_height_m: float = 3.2
@@ -457,11 +503,18 @@ class Config:
     # printability
     min_feature_mm: float = 0.9   # ~2 perimeters at a 0.4 nozzle; inflates thin spires
     embed_mm: float = 0.35        # how far layers sink into what's below them
+    # Layer hierarchy: water > buildings > roads > greenery > terrain. A lower
+    # draped layer is cut away wherever a higher one sits, so no two layers
+    # share footprint - no greenery burying roads, no z-fighting, no two
+    # filaments claiming the same volume in the slicer.
+    layer_hierarchy: bool = True
 
     # data
     duckdb_memory: str = "6GB"
     duckdb_threads: int = 0       # 0 = DuckDB default
-    overpass_url: str = "https://overpass-api.de/api/interpreter"
+    # private.coffee's terms allow any project; overpass-api.de asks that an
+    # app for the public not rely on it, so it is only the last fallback
+    overpass_url: str = "https://overpass.private.coffee/api/interpreter"
     osm_timeout: int = 180
     overture_release: str = ""    # "" -> resolve latest from the STAC catalog
     verbose: bool = True
@@ -619,6 +672,48 @@ def _confirm_empty(cfg, con, sql, path, theme, typ):
     return rows
 
 
+# Overture's STAC release index: one row per GeoParquet file with that file's
+# bbox and S3 path (https://stac.overturemaps.org/<release>/collections.parquet,
+# ~240 KB). Reading only the files that overlap the tile instead of globbing
+# the whole type is the single biggest fetch speed-up there is - a Spa tile's
+# roads went 29 s -> 2.7 s and its buildings 90 s -> 2.4 s, same row counts,
+# because the glob opened the footer of every one of 128 / 512 files to prune.
+# Cached per release for the life of the process (serve.py keeps it warm).
+_STAC_INDEX = {}
+_STAC_LOCK = __import__("threading").Lock()
+
+
+def stac_files(cfg, con, release, typ):
+    """S3 paths of the `typ` files overlapping cfg.bbox, or None when the index
+    is unavailable (the caller then falls back to the glob)."""
+    if not cfg.use_stac_index:
+        return None
+    with _STAC_LOCK:
+        idx = _STAC_INDEX.get(release)
+        if idx is None:
+            try:
+                idx = con.execute(f"""
+                    SELECT collection, bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax,
+                           assets.aws.alternate.s3.href
+                    FROM read_parquet('https://stac.overturemaps.org/{release}/collections.parquet')
+                """).fetchall()
+            except Exception as e:
+                print(f"[info] STAC file index unavailable ({str(e).splitlines()[0][:100]}); "
+                      f"scanning every file instead", file=sys.stderr)
+                # not cached: a network blip must not make a long-running
+                # server scan every file for the rest of its life
+                return None
+            _STAC_INDEX[release] = idx
+    if not idx:
+        return None
+    minx, miny, maxx, maxy = cfg.bbox
+    mine = [r for r in idx if r[0] == typ]
+    if not mine or not all(r[5] for r in mine):
+        return None                     # type missing from the index: don't trust it
+    return [r[5] for r in mine
+            if r[1] <= maxx and r[3] >= minx and r[2] <= maxy and r[4] >= miny]
+
+
 def fetch(cfg, con, release, theme, typ, columns, extra_where=""):
     """
     Pull one Overture type inside the bbox.
@@ -635,7 +730,20 @@ def fetch(cfg, con, release, theme, typ, columns, extra_where=""):
     path = (f"s3://overturemaps-us-west-2/release/{release}/"
             f"theme={theme}/type={typ}/*")
 
-    avail = available_columns(con, path)
+    files = stac_files(cfg, con, release, typ)
+    if files is not None and not files:
+        # The index is authoritative about coverage: no file's bbox touches the
+        # tile, so there is nothing to scan (open ocean for buildings, say).
+        print(f"[info] {theme}/{typ}: no Overture file covers this tile",
+              file=sys.stderr)
+        return []
+    if files:
+        src = ("read_parquet([" + ", ".join(f"'{f}'" for f in files)
+               + "], hive_partitioning=1)")
+        avail = available_columns(con, files[0])
+    else:
+        src = f"read_parquet('{path}', hive_partitioning=1)"
+        avail = available_columns(con, path)
     if avail is not None:
         missing = [c for c in columns if c not in avail]
         columns = [c for c in columns if c in avail] or ["id"]
@@ -657,7 +765,7 @@ def fetch(cfg, con, release, theme, typ, columns, extra_where=""):
     for gexpr in geom_exprs:
         sql = f"""
             SELECT {sel}, {gexpr} AS wkb
-            FROM read_parquet('{path}', hive_partitioning=1)
+            FROM {src}
             WHERE bbox.xmin <= {maxx} AND bbox.xmax >= {minx}
               AND bbox.ymin <= {maxy} AND bbox.ymax >= {miny}
               {extra_where}
@@ -749,7 +857,7 @@ def to_shape(blob):
     return None
 
 
-OVERPASS = "https://overpass-api.de/api/interpreter"
+OVERPASS = "https://overpass.private.coffee/api/interpreter"
 
 
 def fetch_osm(cfg):
@@ -930,6 +1038,104 @@ def fetch_route_osm(name, overpass_url=OVERPASS, timeout=60):
     return path
 
 
+OVERPASS_MIRRORS = (OVERPASS, "https://overpass.kumi.systems/api/interpreter",
+                    "https://overpass-api.de/api/interpreter")
+# Set when a best-effort supplement (the OSM raceways) failed, so a fetch that
+# is missing it is not cached and replayed as though it were complete.
+_SOFT_FAILED = [False]
+
+
+def fetch_osm_raceways(cfg, timeout=25):
+    """`highway=raceway` ways in cfg.bbox from OSM, as road rows.
+
+    Best effort by design: Overpass is a free shared service that is down for
+    hours at a time, and a circuit's absence must not stop a city tile that
+    has everything else. Tries each mirror once, then gives up with a note.
+    """
+    from shapely.geometry import LineString
+    minx, miny, maxx, maxy = cfg.bbox
+    q = (f"[out:json][timeout:{int(timeout)}];"
+         f'way["highway"="raceway"]({miny},{minx},{maxy},{maxx});out geom;')
+    last = None
+    for url in OVERPASS_MIRRORS:
+        try:
+            req = urllib.request.Request(
+                url, data=("data=" + urllib.parse.quote(q)).encode(),
+                headers={"User-Agent": f"map2model/{__version__}"})
+            with urllib.request.urlopen(req, timeout=timeout + 10) as r:
+                data = json.loads(r.read().decode())
+        except Exception as e:
+            last = e
+            continue
+        rows = []
+        for el in data.get("elements", []):
+            pts = [(p["lon"], p["lat"]) for p in el.get("geometry") or []]
+            if el.get("type") == "way" and len(pts) >= 2:
+                rows.append({"id": f"osm:way/{el.get('id')}", "subtype": "road",
+                             "class": "raceway", "subclass": None,
+                             "wkb": LineString(pts).wkb})
+        return rows
+    _SOFT_FAILED[0] = True
+    print(f"[warn] OSM raceways unavailable (every Overpass mirror failed: "
+          f"{str(last).splitlines()[0][:100] if last else '?'}); a race circuit "
+          f"on this tile will print without its track", file=sys.stderr)
+    return []
+
+
+# Rows from recent fetches, keyed by everything that decides WHAT is fetched
+# (the area and the layers), not how it is meshed. A preview rebuilt with a new
+# building stretch or print size is the same area, and re-downloading it cost
+# minutes for nothing. Only a clean, non-empty fetch is kept: a failed or
+# silently-short scan must be retried, never replayed (see _confirm_empty).
+FETCH_CACHE = {}
+FETCH_CACHE_MAX = 4
+
+
+def _fetch_key(cfg):
+    return (tuple(round(float(v), 7) for v in cfg.bbox), cfg.source,
+            cfg.overture_release, cfg.lod, tuple(cfg.road_classes),
+            cfg.use_building_parts, cfg.want_buildings, cfg.want_roads,
+            cfg.want_water, cfg.want_greenery, cfg.osm_raceways,
+            tuple(cfg.road_skip_subclasses), cfg.bridges)
+
+
+def fetch_cached(cfg):
+    """fetch_all(), served from FETCH_CACHE when cfg.fetch_cache is on."""
+    import copy
+    if not cfg.fetch_cache:
+        return fetch_all(cfg)
+    key = _fetch_key(cfg)
+    # An entry fetched with MORE layers serves a build that wants fewer: a
+    # rebuild with greenery switched off is still the same area. Layers this
+    # build does not want come back empty, as fetch_all() would return them.
+    want = key[6:10]                    # buildings, roads, water, greenery
+    hit_key = None
+    for k in FETCH_CACHE:
+        if k[:6] == key[:6] and k[10:] == key[10:] \
+                and all(h or not w for h, w in zip(k[6:10], want)):
+            hit_key = k
+            break
+    if hit_key is not None:
+        hit = FETCH_CACHE.pop(hit_key)
+        FETCH_CACHE[hit_key] = hit                        # most recently used
+        b, parts, water, green, roads = hit
+        wb, wr, ww, wg = want
+        hit = (b if wb else [], parts if wb else [], water if ww else [],
+               green if wg else [], roads if wr else [])
+        names = ("buildings", "parts", "water", "land_cover", "roads")
+        for nm, rows in zip(names, hit):
+            print(f"[layer] {nm}: cached, {len(rows)} rows", file=sys.stderr)
+        # deep copy: run() and its helpers may annotate the row dicts
+        return copy.deepcopy(hit)
+    _SOFT_FAILED[0] = False
+    res = fetch_all(cfg)
+    if not FETCH_ERRORS and not _SOFT_FAILED[0] and any(res):
+        FETCH_CACHE[key] = copy.deepcopy(res)
+        while len(FETCH_CACHE) > FETCH_CACHE_MAX:
+            FETCH_CACHE.pop(next(iter(FETCH_CACHE)))
+    return res
+
+
 def fetch_all(cfg):
     if cfg.source == "osm":
         with Stage("fetch OSM buildings (Overpass)", cfg.verbose):
@@ -995,9 +1201,17 @@ def fetch_all_overture(cfg):
          " AND subtype IN ('forest','grass','wetland','shrub')"),
         ("land_use", "base", "land_use", ["id", "subtype", "class"],
          " AND subtype IN ('park','recreation','cemetery','forest','golf','protected')"),
-        ("roads", "transportation", "segment", ["id", "subtype", "class"],
+        ("roads", "transportation", "segment",
+         ["id", "subtype", "class", "subclass", "road_flags", "level_rules"],
          f" AND subtype = 'road' AND class IN ({cls})"),
     ]
+    if cfg.bridges:
+        # mapped piers, so a pier stands where the real one does
+        jobs.append(("bridge_supports", "base", "infrastructure",
+                     ["id", "subtype", "class"],
+                     " AND subtype = 'bridge' AND class = 'bridge_support'"))
+    if cfg.osm_raceways:
+        jobs.append(("raceways", None, None, None, None))
     if cfg.use_building_parts and cfg.lod >= 2:
         jobs.insert(1, ("parts", "buildings", "building_part",
                         ["id", "building_id", "height", "min_height",
@@ -1007,7 +1221,9 @@ def fetch_all_overture(cfg):
     # Do not scan S3 for layers this build will throw away. --mode terrain and
     # --no-buildings etc. each drop ~2 min of Overture fetch.
     want = {"buildings": cfg.want_buildings, "parts": cfg.want_buildings,
-            "roads": cfg.want_roads, "water": cfg.want_water,
+            "roads": cfg.want_roads, "raceways": cfg.want_roads,
+            "bridge_supports": cfg.want_roads,
+            "water": cfg.want_water,
             "land_cover": cfg.want_greenery, "land_use": cfg.want_greenery}
     jobs = [j for j in jobs if want.get(j[0], True)]
 
@@ -1022,6 +1238,13 @@ def fetch_all_overture(cfg):
         name, theme, typ, cols, where = job
         t0 = time.time()
         print(f"[layer] {name}: fetching", file=sys.stderr, flush=True)
+        if name == "raceways":
+            rows = fetch_osm_raceways(cfg)
+            n = len(rows)
+            print(f"[layer] {name}: " + (f"{n} rows in {time.time() - t0:.0f}s"
+                                         if n else f"empty in {time.time() - t0:.0f}s"),
+                  file=sys.stderr, flush=True)
+            return name, rows
         cur = con.cursor()
         try:
             rows = fetch(cfg, cur, release, theme, typ, cols, where)
@@ -1056,6 +1279,16 @@ def fetch_all_overture(cfg):
     water = out.get("water", [])
     green = out.get("land_cover", []) + out.get("land_use", [])
     roads = out.get("roads", [])
+    skip = set(cfg.road_skip_subclasses)
+    roads = [r for r in roads if (r.get("subclass") or "") not in skip]
+    if out.get("raceways"):
+        stage("OSM raceways added", len(out["raceways"]))
+        roads = roads + out["raceways"]
+    # Supports ride in the roads list (tagged by class) so fetch_all keeps its
+    # five-tuple shape; run() takes them back out before meshing.
+    for r in out.get("bridge_supports", []):
+        r["class"] = "bridge_support"
+        roads.append(r)
     stage("buildings fetched", len(b))
     stage("building_parts fetched", len(parts))
     stage("water fetched", len(water))
@@ -1074,8 +1307,17 @@ def fetch_all_overture(cfg):
 class Projector:
     """Local transverse-mercator centred on the tile: metres, minimal distortion."""
 
-    def __init__(self, bbox):
+    def __init__(self, bbox, rotate_deg=0.0):
+        """`rotate_deg`: the tile is turned that many degrees CLOCKWISE on the
+        map. Projected coordinates are then turned back by the same amount
+        about the tile centre, so every layer, the tile outline and the DEM
+        sampler all see an axis-aligned square and nothing downstream needs
+        to know - except compass bearings (roof:direction), which must be
+        reduced by `rot_deg` (see build_buildings)."""
         from pyproj import CRS, Transformer
+        self.rot_deg = float(rotate_deg or 0.0)
+        t = math.radians(self.rot_deg)
+        self._c, self._s = math.cos(t), math.sin(t)
         minx, miny, maxx, maxy = bbox
         self.lon0 = (minx + maxx) / 2
         self.lat0 = (miny + maxy) / 2
@@ -1087,12 +1329,31 @@ class Projector:
         (self.minx, self.maxx) = self.fwd.transform([minx, maxx], [miny, maxy])[0]
         (self.miny, self.maxy) = self.fwd.transform([minx, maxx], [miny, maxy])[1]
 
+    def xy(self, lon, lat):
+        """lon/lat -> projected metres, turned back by the tile rotation."""
+        x, y = self.fwd.transform(lon, lat)
+        if not self.rot_deg:
+            return x, y
+        x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        return x * self._c - y * self._s, x * self._s + y * self._c
+
     def geom(self, g):
         from shapely.ops import transform
-        return transform(lambda x, y, z=None: self.fwd.transform(x, y), g)
+        return transform(lambda x, y, z=None: self.xy(x, y), g)
 
     def to_lonlat(self, x, y):
+        if self.rot_deg:
+            x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+            x, y = x * self._c + y * self._s, -x * self._s + y * self._c
         return self.inv.transform(x, y)
+
+    def envelope_lonlat(self):
+        """The lon/lat box around the (rotated) tile - what has to be fetched."""
+        xs = [self.minx, self.maxx, self.maxx, self.minx]
+        ys = [self.miny, self.miny, self.maxy, self.maxy]
+        lon, lat = self.to_lonlat(np.array(xs), np.array(ys))
+        return (float(np.min(lon)), float(np.min(lat)),
+                float(np.max(lon)), float(np.max(lat)))
 
 
 # ----------------------------------------------------------------------------
@@ -1156,6 +1417,13 @@ def terrain_drape_cell(cfg, proj, terr):
     return float(min(coarse, want))
 
 
+# Decoded terrarium tiles, keyed (z, x, y), shared across builds in one
+# process. 256 tiles x 256 KB = 64 MB at most.
+_DEM_TILES = {}
+_DEM_TILES_MAX = 256
+_DEM_LOCK = __import__("threading").Lock()   # the tile pool writes it in parallel
+
+
 class Terrain:
     """Bilinear elevation sampler in projected metres. Falls back to flat."""
 
@@ -1183,19 +1451,38 @@ class Terrain:
         W = (tx1 - tx0 + 1) * 256
         H = (ty1 - ty0 + 1) * 256
         canvas = np.zeros((H, W), dtype=np.float32)
-        s = requests.Session()
-        ntiles = (tx1 - tx0 + 1) * (ty1 - ty0 + 1)
+        from concurrent.futures import ThreadPoolExecutor
+        tiles = [(tx, ty) for tx in range(tx0, tx1 + 1)
+                 for ty in range(ty0, ty1 + 1)]
+        ntiles = len(tiles)
         tk = Ticker(ntiles, f"downloading {ntiles} elevation tiles", cfg.verbose)
-        done = 0
-        for tx in range(tx0, tx1 + 1):
-            for ty in range(ty0, ty1 + 1):
-                tk.tick(done)
-                done += 1
-                url = f"https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{tx}/{ty}.png"
-                r = s.get(url, timeout=30)
+        local = __import__("threading").local()
+
+        # One tile at a time, re-downloaded on every build, was a few seconds
+        # of every rebuild of the same tile. Fetch in parallel, and keep the
+        # decoded tiles in memory (serve.py lives across builds).
+        def one(t):
+            key = (z, t[0], t[1])
+            elev = _DEM_TILES.get(key)
+            if elev is None:
+                if not hasattr(local, "s"):
+                    local.s = requests.Session()
+                url = (f"https://s3.amazonaws.com/elevation-tiles-prod/"
+                       f"terrarium/{z}/{t[0]}/{t[1]}.png")
+                r = local.s.get(url, timeout=30)
                 r.raise_for_status()
-                a = np.asarray(Image.open(io.BytesIO(r.content)).convert("RGB"), dtype=np.float32)
+                a = np.asarray(Image.open(io.BytesIO(r.content)).convert("RGB"),
+                               dtype=np.float32)
                 elev = a[:, :, 0] * 256.0 + a[:, :, 1] + a[:, :, 2] / 256.0 - 32768.0
+                with _DEM_LOCK:
+                    _DEM_TILES[key] = elev
+                    while len(_DEM_TILES) > _DEM_TILES_MAX:
+                        _DEM_TILES.pop(next(iter(_DEM_TILES)))
+            return t, elev
+
+        with ThreadPoolExecutor(max_workers=min(8, ntiles)) as pool:
+            for done, ((tx, ty), elev) in enumerate(pool.map(one, tiles)):
+                tk.tick(done)
                 canvas[(ty - ty0) * 256:(ty - ty0 + 1) * 256,
                        (tx - tx0) * 256:(tx - tx0 + 1) * 256] = elev
         self.dem = canvas
@@ -2017,6 +2304,370 @@ def build_terrain(cfg, proj, terr, S, water_polys=None):
     return V, F
 
 
+# ----------------------------------------------------------------------------
+# Name plate text. Archivo Black (SIL OFL 1.1, fonts/OFL.txt): free to embed
+# and ship commercially. Heavy strokes on purpose - the frame prints with a
+# 0.4 mm nozzle, and a thin letter is a letter that is not there.
+# ----------------------------------------------------------------------------
+FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "fonts", "ArchivoBlack-Regular.ttf")
+# Uppercase only: at ~4 mm a lowercase e or a closes up solid. No comma and
+# no ampersand either: at this size a third of the comma's tail and the
+# crossing of the & are under two nozzle widths (write AND).
+NAMEPLATE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .-'\u00b7"
+NAMEPLATE_TRACK = 0.04       # letter spacing, x cap height
+NAMEPLATE_THICKEN = 0.05     # mm added all round every stroke (see below)
+_FONT = {}
+
+
+def _font():
+    if "f" not in _FONT:
+        from fontTools.ttLib import TTFont
+        _FONT["f"] = TTFont(FONT_PATH)
+    return _FONT["f"]
+
+
+def nameplate_cap_mm(cfg):
+    """Capital height that fits the frame's top border with 0.8 mm each side."""
+    return max(2.0, cfg.frame_width_mm - 1.6)
+
+
+def nameplate_clean(text):
+    """Uppercase, and refuse anything the font or the nozzle cannot carry."""
+    t = " ".join(str(text or "").upper().split())
+    bad = sorted({c for c in t if c not in NAMEPLATE_CHARS})
+    if bad:
+        raise ValueError(
+            f"the name can only use A-Z, 0-9, spaces and . - ' \u00b7 "
+            f"(not {' '.join(bad)})")
+    return t
+
+
+def nameplate_width_mm(text, cap_mm):
+    """Laid-out width, from advance widths only (no kerning) - the console
+    computes exactly the same sum from its mirror of these advances."""
+    f = _font()
+    cmap, hmtx = f.getBestCmap(), f["hmtx"]
+    k = cap_mm / f["OS/2"].sCapHeight
+    adv = [hmtx[cmap[ord(c)]][0] * k for c in text]
+    track = NAMEPLATE_TRACK * cap_mm + 2 * NAMEPLATE_THICKEN
+    return sum(adv) + track * max(0, len(text) - 1)
+
+
+def nameplate_advances():
+    """{char: advance in font units} - the table the console mirrors."""
+    f = _font()
+    cmap, hmtx = f.getBestCmap(), f["hmtx"]
+    return {c: hmtx[cmap[ord(c)]][0] for c in NAMEPLATE_CHARS}
+
+
+def text_polys(text, cap_mm):
+    """`text` as shapely polygons in mm: baseline y=0, starting at x=0.
+
+    Curves are flattened; contours are combined even-odd (symmetric
+    difference), so counters in A, B, O, 8... come out as holes. Every stroke
+    is grown by NAMEPLATE_THICKEN all round: at the 4.4 mm cap height of the
+    default frame, Archivo Black's thinnest joins (the spur of G, the tail of
+    &) fall just under the 0.9 mm two-perimeter width; the letter spacing
+    grows by the same amount so letters never merge.
+    """
+    from fontTools.pens.basePen import BasePen
+    from shapely.geometry import Polygon
+    from shapely.affinity import translate
+    f = _font()
+    gs, cmap, hmtx = f.getGlyphSet(), f.getBestCmap(), f["hmtx"]
+    k = cap_mm / f["OS/2"].sCapHeight
+
+    class Pen(BasePen):
+        def __init__(self, glyphs):
+            super().__init__(glyphs)
+            self.rings, self.cur = [], []
+
+        def _moveTo(self, p):
+            self.cur = [p]
+
+        def _lineTo(self, p):
+            self.cur.append(p)
+
+        def _qCurveToOne(self, p1, p2):
+            p0 = self.cur[-1]
+            for i in range(1, 7):
+                t = i / 6.0
+                u = 1 - t
+                self.cur.append((u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
+                                 u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1]))
+
+        def _curveToOne(self, p1, p2, p3):
+            p0 = self.cur[-1]
+            for i in range(1, 9):
+                t = i / 8.0
+                u = 1 - t
+                self.cur.append(
+                    (u ** 3 * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t ** 3 * p3[0],
+                     u ** 3 * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t ** 3 * p3[1]))
+
+        def _closePath(self):
+            if len(self.cur) >= 3:
+                self.rings.append(self.cur)
+            self.cur = []
+
+        _endPath = _closePath
+
+    track = NAMEPLATE_TRACK * cap_mm + 2 * NAMEPLATE_THICKEN
+    out, x = [], 0.0
+    for c in text:
+        g = cmap[ord(c)]
+        pen = Pen(gs)
+        gs[g].draw(pen)
+        shape = None
+        for ring in pen.rings:
+            q = Polygon([(a * k, b * k) for a, b in ring]).buffer(0)
+            shape = q if shape is None else shape.symmetric_difference(q)
+        if shape is not None and not shape.is_empty:
+            shape = shape.buffer(NAMEPLATE_THICKEN, join_style=2)
+            shape = translate(shape, xoff=x)
+            out.extend(list(shape.geoms) if shape.geom_type == "MultiPolygon"
+                       else [shape])
+        x += hmtx[g][0] * k + track
+    return out
+
+
+def nameplate_layout(cfg, shape_mm):
+    """(letter polygons, rib notch) in frame coordinates, or (None, None).
+
+    The text sits centred on the chosen side's top border, reading from
+    outside that side ("up" points into the tile). It must leave
+    nameplate_corner_mm of border at each end so the cover's rib still grips
+    the corners; longer text is refused, never shrunk - shrinking is how a
+    letter ends up thinner than the nozzle.
+    """
+    from shapely.affinity import rotate, translate
+    from shapely.geometry import box as _box
+    from shapely.ops import unary_union
+    text = nameplate_clean(cfg.nameplate)
+    if not text:
+        return None, None
+    if (cfg.tile_shape or "square") != "square":
+        raise ValueError("a name plate needs a square tile (hex and circle "
+                         "frames have no straight side to carry it)")
+    side = (cfg.nameplate_side or "s").lower()[:1]
+    if side not in "nesw":
+        raise ValueError(f"--nameplate-side must be n, e, s or w, not {cfg.nameplate_side!r}")
+    cap = nameplate_cap_mm(cfg)
+    x0, y0, x1, y1 = shape_mm.bounds
+    c, fw = cfg.frame_clearance_mm, cfg.frame_width_mm
+    along = (x1 - x0 if side in "ns" else y1 - y0) + 2 * (c + fw)
+    room = along - 2 * cfg.nameplate_corner_mm
+    width = nameplate_width_mm(text, cap)
+    if width > room:
+        raise ValueError(
+            f"the name is {width:.0f} mm long but this side of the frame has "
+            f"room for {room:.0f} mm - shorten it (a larger print size has "
+            f"more room)")
+    letters = text_polys(text, cap)
+    if not letters:
+        return None, None
+    g = unary_union(letters)
+    # centre on the origin: along = x, across = y (cap height)
+    g = translate(g, xoff=-width / 2.0, yoff=-cap / 2.0)
+    mid = c + fw / 2.0
+    ang = {"s": 0, "n": 180, "e": 90, "w": -90}[side]
+    off = {"s": (0.0, y0 - mid), "n": (0.0, y1 + mid),
+           "e": (x1 + mid, 0.0), "w": (x0 - mid, 0.0)}[side]
+    g = translate(rotate(g, ang, origin=(0, 0)), *off)
+    # the notch: the text's run of border (+1 mm) across the whole rib, or
+    # the whole side between the corner allowances for rib="none"
+    half = (width / 2.0 + 1.0 if cfg.nameplate_rib != "none"
+            else along / 2.0 - cfg.nameplate_corner_mm)
+    deep = c + fw + 50.0                  # past the rib and the cover wall
+    band = _box(-half, -deep, half, deep)
+    notch = translate(rotate(band, ang, origin=(0, 0)), *off)
+    # keep only the half-plane outside the tile edge for this side
+    outside = {"s": _box(-1e4, -1e4, 1e4, y0), "n": _box(-1e4, y1, 1e4, 1e4),
+               "e": _box(x1, -1e4, 1e4, 1e4), "w": _box(-1e4, -1e4, x0, 1e4)}[side]
+    notch = notch.intersection(outside)
+    polys = list(g.geoms) if g.geom_type == "MultiPolygon" else [g]
+    return polys, notch
+
+
+def split_road_levels(line, rec):
+    """Cut a road centreline into ('ground'|'bridge'|'tunnel', level, piece).
+
+    Overture scopes `road_flags` and `level_rules` to a `between` = [a, b]
+    fraction of the segment (None = all of it): Westminster Bridge is
+    is_bridge over [0, 0.25] at level 1. Every range end becomes a cut point;
+    each resulting stretch is classified at its midpoint and runs of the same
+    kind are merged. A positive level without a bridge flag (a raised ramp)
+    counts as a bridge; a negative level without a tunnel flag (a cutting,
+    an underground ramp) is dropped like a tunnel.
+    """
+    from shapely.ops import substring
+    flags = rec.get("road_flags") or []
+    levels = rec.get("level_rules") or []
+    if not flags and not levels:
+        return [("ground", 0, line)]
+
+    def rng(b):
+        if not b or len(b) != 2 or b[0] is None or b[1] is None:
+            return 0.0, 1.0
+        return max(0.0, float(b[0])), min(1.0, float(b[1]))
+
+    cuts = {0.0, 1.0}
+    rules = []
+    for f in flags:
+        a, b = rng(f.get("between"))
+        cuts.update((a, b))
+        rules.append(("flag", set(f.get("values") or []), a, b))
+    for lv in levels:
+        a, b = rng(lv.get("between"))
+        cuts.update((a, b))
+        rules.append(("level", int(lv.get("value") or 0), a, b))
+    cuts = sorted(cuts)
+    out = []
+    for a, b in zip(cuts, cuts[1:]):
+        if b - a < 1e-6:
+            continue
+        m = (a + b) / 2.0
+        bridge = tunnel = False
+        level = 0
+        for kind, v, ra, rb in rules:
+            if not (ra <= m <= rb):
+                continue
+            if kind == "flag":
+                bridge |= "is_bridge" in v
+                tunnel |= "is_tunnel" in v
+            else:
+                level = v
+        if tunnel or level < 0:
+            k, lv = "tunnel", level
+        elif bridge or level > 0:
+            k, lv = "bridge", max(1, level)
+        else:
+            k, lv = "ground", 0
+        if out and out[-1][0] == k and out[-1][1] == lv and abs(out[-1][3] - a) < 1e-9:
+            out[-1][3] = b
+        else:
+            out.append([k, lv, a, b])
+    pieces = []
+    for k, lv, a, b in out:
+        try:
+            g = substring(line, a, b, normalized=True)
+        except Exception:
+            continue
+        if g.is_empty or g.length <= 0:
+            continue
+        pieces.append((k, lv, g))
+    return pieces
+
+
+def build_bridges(cfg, proj, terr, S, bridges, water_u=None, supports=()):
+    """Decks and piers for the bridged stretches of road.
+
+    `bridges` = [(centreline, level, width_m)] in projected metres. Each deck
+    is the centreline buffered to the road's width, NOT cut by water. Its top
+    runs straight between the road surface at its two ends - never the DEM
+    over the water, which is the river - and ramps up by level x
+    bridge_level_mm over the first and last fifth of its length, so it meets
+    the ground road flush at each end. Piers go at mapped `bridge_support`
+    points on the deck, else every bridge_pier_mm, wherever the deck stands
+    clear of what is under it: down to z=0 over water (the land plate is cut
+    through there, so a pier rests on the water plate) and into the ground
+    elsewhere. A deck with nothing under it would be a long unsupported span.
+    """
+    from shapely.geometry import Point
+    acc = MeshAccum()
+    if not bridges:
+        return None
+    cx = (proj.minx + proj.maxx) / 2
+    cy = (proj.miny + proj.maxy) / 2
+
+    def ground_mm(x, y):
+        g = terr.elev_xy(np.atleast_1d(x), np.atleast_1d(y))
+        return (g - terr_min[0]) * terr_relief_scale[0] * S.z + cfg.base_mm
+
+    def solid(poly, top_fn, bot_fn):
+        polys = list(poly.geoms) if poly.geom_type == "MultiPolygon" else [poly]
+        pieces = []
+        for q in polys:
+            bx = q.bounds
+            pieces += robust_pieces(q, max(bx[2] - bx[0], bx[3] - bx[1]) / 2.0)
+        for p in pieces:
+            V2, F, lens = tri2d(p)
+            if V2 is None:
+                continue
+            n = len(V2)
+            zt, zb = top_fn(V2), bot_fn(V2)
+            zb = np.minimum(zb, zt - 0.2)
+            px = (V2[:, 0] - cx) * S.xy
+            py = (V2[:, 1] - cy) * S.xy
+            V = np.vstack([np.column_stack([px, py, zb]),
+                           np.column_stack([px, py, zt])])
+            faces = [F[:, ::-1], F + n]
+            _walls(faces, lens, n)
+            acc.add((V, np.concatenate([f.reshape(-1, 3) for f in faces])))
+
+    pier_m = max(cfg.bridge_pier_mm / S.xy, 1e-6)
+    pier_half = max(cfg.min_feature_mm * 1.4, 1.2) / 2.0 / S.xy
+    sup_pts = [Point(p) if not hasattr(p, "geom_type") else p.centroid
+               for p in supports]
+    road_top = cfg.roads_mm
+    for line, level, width in bridges:
+        L = line.length
+        if L <= 0:
+            continue
+        # enough vertices along the deck that the ramp is a curve, not a plank
+        step = max(min(L / 12.0, 2.0 / S.xy), 0.5)
+        deck = line.buffer(width / 2.0, cap_style=2, join_style=2)
+        if deck.is_empty:
+            continue
+        # a buffer drops collinear points - a straight bridge comes back as
+        # four corners - so put vertices back along its edges for the ramp
+        if hasattr(deck, "segmentize"):
+            deck = deck.segmentize(step)
+        (x0, y0), (x1, y1) = line.coords[0], line.coords[-1]
+        z0, z1 = float(ground_mm(x0, y0)[0]), float(ground_mm(x1, y1)[0])
+        rise = level * cfg.bridge_level_mm
+
+        def top_at(t):
+            t = np.clip(t, 0.0, 1.0)
+            ramp = np.clip(np.minimum(t, 1.0 - t) / 0.2, 0.0, 1.0)
+            ramp = ramp * ramp * (3.0 - 2.0 * ramp)
+            return z0 + (z1 - z0) * t + road_top + rise * ramp
+
+        def t_of(V2):
+            return np.array([line.project(Point(a, b), normalized=True)
+                             for a, b in V2])
+
+        solid(deck, lambda V2: top_at(t_of(V2)),
+              lambda V2: top_at(t_of(V2)) - cfg.bridge_deck_mm)
+
+        # piers: mapped supports on this deck, else evenly spaced
+        near = [p for p in sup_pts if deck.buffer(width).contains(p)]
+        if near:
+            ts = [line.project(p, normalized=True) for p in near]
+        else:
+            k = int(L // pier_m)
+            ts = [(i + 1) / (k + 1) for i in range(k)] if k else [0.5]
+        for t in ts:
+            if not 0.15 <= t <= 0.85:
+                continue              # the ramps sit on the ground already
+            pt = line.interpolate(t, normalized=True)
+            # "near" water, not strictly inside: the river outline has a hole
+            # at each mapped pier (OSM draws piers as islands), so the pier
+            # point itself is never inside the water polygon
+            wet = water_u is not None and water_u.distance(pt) < width
+            deck_bot = float(top_at(t)) - cfg.bridge_deck_mm
+            gz = float(ground_mm(pt.x, pt.y)[0])
+            base = 0.0 if wet else gz - cfg.embed_mm
+            if deck_bot - base < 0.3:
+                continue              # already resting on what is below
+            sq = pt.buffer(pier_half, cap_style=3)
+            solid(sq, lambda V2, z=deck_bot + 0.1: np.full(len(V2), z),
+                  lambda V2, z=base: np.full(len(V2), z))
+    stage("bridge decks", len(bridges))
+    return acc.result()
+
+
 def build_drape(cfg, proj, terr, S, polys, thickness_mm, embed_mm,
                 cell_m=None, label="draping", flat_bottom=None, top_cap_mm=None,
                 shore=None):
@@ -2397,7 +3048,7 @@ def _cover_posts(shape, cfg, reach):
     return unary_union(posts) if posts else border
 
 
-def build_box(cfg, shape, model_top_mm):
+def build_box(cfg, shape, model_top_mm, notch=None):
     """
     Two half-covers that slide on from opposite ends and meet in the middle.
     `shape` is the tile outline in mm, centred on the origin; every ring below
@@ -2470,6 +3121,10 @@ def build_box(cfg, shape, model_top_mm):
     lip_ring = ring_at(lip_reach)
     wall_ring = ring_at(0.0)
     rib_ring = ring_at(rib_reach)
+    if notch is not None and not notch.is_empty:
+        # the name plate stands proud of the frame top, right where the rib
+        # grips: cut the rib away over it. Lip, walls and corner posts stay.
+        rib_ring = rib_ring.difference(notch)
     posts = _cover_posts(shape, cfg, rib_reach)
 
     def half(sign):
@@ -2727,7 +3382,11 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
                                                              3.5 * S.z)
                     frac = cfg.roof_height_max_frac if pointed else cfg.ridge_roof_max_frac
                     rh_mm = max(0.15, min(rh_mm, frac * (z1 - z0)))
-                    cap = roof_cap(pmm, shape, rh_mm, rec.get("roof_direction"),
+                    rdir = rec.get("roof_direction")
+                    if rdir is not None and proj.rot_deg:
+                        # a compass bearing: the tile (and so +y) is turned
+                        rdir = float(rdir) - proj.rot_deg
+                    cap = roof_cap(pmm, shape, rh_mm, rdir,
                                    cfg.min_feature_mm, mode=cfg.roof_mode,
                                    orientation=rec.get("roof_orientation"))
         span = max(pmm.bounds[2] - pmm.bounds[0], pmm.bounds[3] - pmm.bounds[1])
@@ -2816,7 +3475,7 @@ def build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly):
                 # beside the tower and swing sideways as they narrow (the "fan").
                 if rule.get("center"):
                     cx, cy = rule["center"]
-                    px, py = proj.fwd.transform(cx, cy)
+                    px, py = proj.xy(cx, cy)
                     shared_c = np.asarray(
                         scale_poly(Point(px, py).buffer(1e-6), proj, S)
                         .centroid.coords[0], dtype=float)
@@ -3370,7 +4029,16 @@ def run(cfg, out_path):
                 "--route-file PATH, or --route \"lat,lon;lat,lon;...\"")
         cfg._route_pts = pts
     terr_relief_scale[0] = 1.0
-    proj = Projector(cfg.bbox)
+    # A rotated tile: cfg.bbox is the SQUARE before rotation (what --center
+    # --radius describe). The projector turns it upright; the fetch and the
+    # DEM then need the lon/lat envelope of the turned square, which is wider.
+    square = getattr(cfg, "_square_bbox", None) or tuple(cfg.bbox)
+    cfg._square_bbox = square
+    proj = Projector(square, cfg.rotate_deg)
+    if cfg.rotate_deg:
+        cfg.bbox = proj.envelope_lonlat()
+        log(cfg, f"[rotate] tile turned {cfg.rotate_deg:g} deg clockwise; "
+                 f"fetching {cfg.bbox}")
     span_x = proj.maxx - proj.minx
     span_y = proj.maxy - proj.miny
     S = Scale(xy=cfg.size_mm / max(span_x, span_y),
@@ -3430,9 +4098,18 @@ def run(cfg, out_path):
                          f"{cfg.terrain_min_peak_mm:.0f} mm "
                          f"(~{r_px * 2:.0f} DEM px)")
 
+    if cfg.nameplate:
+        # refuse a bad or over-long name NOW, not after minutes of download:
+        # measured against the tile's own frame side
+        # by laying it out for real on this tile's frame - the square-only
+        # rule, the length of THIS side (a CLI --bbox need not be square)
+        # and the font all get checked, not an approximation of them
+        cfg.nameplate = nameplate_clean(cfg.nameplate)
+        nameplate_layout(cfg, scale_poly(bbox_poly, proj, S))
+
     del FETCH_ERRORS[:]
     _EMPTY_RETRIED[0] = False
-    buildings, parts, water, green, roads = fetch_all(cfg)
+    buildings, parts, water, green, roads = fetch_cached(cfg)
 
     # NEVER write a blank tile. A failed query returns [] exactly like an empty
     # tile does, so the exporter used to sail on and produce a bare terrain slab
@@ -3532,6 +4209,11 @@ def run(cfg, out_path):
                   file=sys.stderr)
         return out
 
+    # bridged stretches, pulled out of the roads before any water cut:
+    # [(centreline, level, width_m)] for build_bridges()
+    bridge_lines = []
+    tunnels = [0]
+
     def to_road_polys(recs):
         out = []
         for r in recs:
@@ -3540,12 +4222,41 @@ def run(cfg, out_path):
                 continue
             g = proj.geom(g)
             w = cfg.road_width_m.get(r.get("class") or "", 8.0)
-            try:
-                buf = g.buffer(w / 2.0, cap_style=2, join_style=1)
-            except Exception:
-                continue
-            out.extend(clean_polys(buf, bbox_poly, 1.0))
+            pieces = (split_road_levels(g, r) if cfg.bridges
+                      and g.geom_type == "LineString" else [("ground", 0, g)])
+            for kind, level, piece in pieces:
+                if kind == "tunnel":
+                    tunnels[0] += 1            # underground: nothing to print
+                    continue
+                if kind == "bridge":
+                    try:
+                        clipped = piece.intersection(bbox_poly)
+                    except Exception:
+                        continue
+                    short = []
+                    for ln in (list(clipped.geoms) if hasattr(clipped, "geoms")
+                               else [clipped]):
+                        if ln.geom_type != "LineString":
+                            continue
+                        if ln.length > w:
+                            bridge_lines.append((ln, level, w))
+                        else:
+                            short.append(ln)      # a culvert: keep it as road
+                    if not short:
+                        continue
+                    from shapely.geometry import MultiLineString
+                    piece = MultiLineString(short)
+                try:
+                    buf = piece.buffer(w / 2.0, cap_style=2, join_style=1)
+                except Exception:
+                    continue
+                out.extend(clean_polys(buf, bbox_poly, 1.0))
         return out
+
+    # bridge supports ride in the roads list (see fetch_all_overture)
+    supports = [proj.geom(g) for g in (to_shape(r.get("wkb")) for r in roads
+                if r.get("class") == "bridge_support") if g is not None]
+    roads = [r for r in roads if r.get("class") != "bridge_support"]
 
     with Stage("project + clean vectors", cfg.verbose):
         water_p = to_polys(water, 20.0)
@@ -3554,6 +4265,8 @@ def run(cfg, out_path):
         stage("water polygons", len(water_p))
         stage("greenery polygons", len(green_p))
         stage("road polygons", len(road_p))
+        stage("bridge stretches", len(bridge_lines))
+        stage("tunnel stretches dropped", tunnels[0])
 
     # dissolve overlapping features, then re-simplify: unary_union reintroduces
     # collinear vertices at every intersection, which ear-clip to zero area.
@@ -3581,31 +4294,64 @@ def run(cfg, out_path):
         water_p = dissolve(water_p)
         green_p = dissolve(green_p)
 
+    def subtract(polys, cutter):
+        """Each polygon minus `cutter`, flattened back to plain Polygons."""
+        out = []
+        for p in polys:
+            try:
+                d = p.difference(cutter)
+            except Exception:
+                out.append(p)
+                continue
+            if d.is_empty:
+                continue
+            # difference usually returns a MultiPolygon - flatten it,
+            # don't discard it
+            geoms = (list(d.geoms)
+                     if d.geom_type in ("MultiPolygon", "GeometryCollection")
+                     else [d])
+            out.extend(g for g in geoms
+                       if g.geom_type == "Polygon" and g.area > 1e-9)
+        return out
+
     # keep greenery and roads out of the water
     if water_p:
         wu = unary_union(water_p)
+        green_p = subtract(green_p, wu)
+        road_p = subtract(road_p, wu)
 
-        def subtract(polys):
-            out = []
-            for p in polys:
-                try:
-                    d = p.difference(wu)
-                except Exception:
-                    out.append(p)
-                    continue
-                if d.is_empty:
-                    continue
-                # difference usually returns a MultiPolygon - flatten it,
-                # don't discard it
-                geoms = (list(d.geoms)
-                         if d.geom_type in ("MultiPolygon", "GeometryCollection")
-                         else [d])
-                out.extend(g for g in geoms
-                           if g.geom_type == "Polygon" and g.area > 1e-9)
-            return out
-
-        green_p = subtract(green_p)
-        road_p = subtract(road_p)
+    # LAYER HIERARCHY. Greenery is 0.8 mm proud and roads only 0.5 mm, so where
+    # the two overlap greenery buries the road outright - a Spa-Francorchamps
+    # tile had 98% of its road footprint under forest - and the preview
+    # z-fights along every shared edge. Cut each lower layer wherever a higher
+    # one sits: buildings cut roads and greenery, roads cut greenery. A layer
+    # that is switched off cuts nothing, so its footprint is not left as a hole.
+    if cfg.layer_hierarchy:
+        with Stage("layer hierarchy", cfg.verbose):
+            if cfg.want_buildings and buildings:
+                # ground footprints only: a bridge or an overhang starting in
+                # mid-air must not punch a hole in the road under it
+                on_ground = [b for b in buildings
+                             if float(b.get("min_height") or 0.0) <= 0.5]
+                fp = to_polys(on_ground, 1.0)
+                bu = unary_union(fp) if fp else None
+                if bu is not None and not bu.is_empty:
+                    a0 = sum(p.area for p in green_p) + sum(p.area for p in road_p)
+                    green_p = subtract(green_p, bu)
+                    road_p = subtract(road_p, bu)
+                    stage("m\u00b2 of roads + greenery under buildings removed",
+                          int(a0 - sum(p.area for p in green_p)
+                              - sum(p.area for p in road_p)))
+            if cfg.want_roads and road_p and green_p:
+                ru = unary_union(road_p)
+                a0 = sum(p.area for p in green_p)
+                green_p = subtract(green_p, ru)
+                stage("m\u00b2 of greenery under roads removed",
+                      int(a0 - sum(p.area for p in green_p)))
+            # a difference leaves collinear vertices and hairline slivers along
+            # every cut; dissolve cleans both before earcut sees them
+            green_p = dissolve(green_p)
+            road_p = dissolve(road_p)
 
     raw = []
     if cfg.mode == "terrain" and cfg.terrain_bands > 1:
@@ -3663,10 +4409,18 @@ def run(cfg, out_path):
                                 cfg.greenery_mm, cfg.embed_mm,
                                 label="draping greenery")))
     with Stage("mesh roads", cfg.verbose):
-        raw.append(("roads", None if not cfg.want_roads else
-                    build_drape(cfg, proj, terr, S, road_p,
+        road_mesh = None
+        if cfg.want_roads:
+            acc = MeshAccum()
+            acc.add(build_drape(cfg, proj, terr, S, road_p,
                                 cfg.roads_mm, cfg.embed_mm,
-                                label="draping roads")))
+                                label="draping roads"))
+            if bridge_lines:
+                acc.add(build_bridges(cfg, proj, terr, S, bridge_lines,
+                                      unary_union(water_p) if water_p else None,
+                                      supports))
+            road_mesh = acc.result()
+        raw.append(("roads", road_mesh))
     with Stage("mesh buildings", cfg.verbose):
         raw.append(("buildings", None if not cfg.want_buildings else
                     build_buildings(cfg, proj, terr, S, buildings, parts, bbox_poly)))
@@ -3683,6 +4437,21 @@ def run(cfg, out_path):
             raw.append(("frame", walls_vf))
             if cfg.water_in_frame and floor_vf is not None:
                 raw.append(("water", floor_vf))
+    name_notch = None
+    if cfg.frame and cfg.nameplate:
+        with Stage("mesh name plate", cfg.verbose):
+            letters, name_notch = nameplate_layout(cfg, shape_mm)
+            if letters:
+                from shapely.affinity import translate as _tr
+                top = max(cfg.frame_floor_mm, 0.0) + cfg.frame_depth_mm
+                if not cfg.frame_inplace:          # parked with the frame
+                    x0, _, x1, _ = shape_mm.bounds
+                    xo = (x1 - x0) + cfg.frame_clearance_mm + cfg.frame_width_mm + 10.0
+                    letters = [_tr(p, xoff=xo) for p in letters]
+                acc = MeshAccum()
+                for p in letters:
+                    acc.add(prism_any(p, top - 0.05, top + cfg.nameplate_mm))
+                raw.append(("name", acc.result()))
     if cfg.box:
         with Stage("mesh shipping box", cfg.verbose):
             # size the lid from what was actually built, not a guess
@@ -3693,7 +4462,7 @@ def run(cfg, out_path):
                 V = vf[0]
                 if len(V):
                     top = max(top, float(np.max(V[:, 2])))
-            left_vf, right_vf = build_box(cfg, shape_mm, top)
+            left_vf, right_vf = build_box(cfg, shape_mm, top, notch=name_notch)
             raw.append(("cover_left", left_vf))
             raw.append(("cover_right", right_vf))
 
@@ -3716,9 +4485,9 @@ def run(cfg, out_path):
             present = [n for n in model_order if n in have]
             main, spill = present[:4], present[4:]
             if cfg.water_in_frame:
-                groups = [("", main), ("_frame", ["frame", "water"])]
+                groups = [("", main), ("_frame", ["frame", "water", "name"])]
             else:
-                groups = [("", main), ("_water", ["water"]), ("_frame", ["frame"])]
+                groups = [("", main), ("_water", ["water"]), ("_frame", ["frame", "name"])]
             for i, nm in enumerate(spill, start=2):
                 groups.append((f"_plate{i}", [nm]))
             groups.append(("_cover", ["cover_left", "cover_right"]))
@@ -3952,8 +4721,7 @@ def main():
                          "'osm' (plain OpenStreetMap via Overpass: outlines "
                          "only, no building parts, so the CN Tower is a single "
                          "cylinder and nothing can be mis-oriented)")
-    ap.add_argument("--overpass-url",
-                    default="https://overpass-api.de/api/interpreter")
+    ap.add_argument("--overpass-url", default=OVERPASS)
     ap.add_argument("--lod", type=int, default=2, choices=(1, 2),
                     help="1 = one flat-topped prism per building outline "
                          "(CityGML LOD1: no parts, no roofs, zero artifacts). "
@@ -4001,6 +4769,25 @@ def main():
                     help="write a plain 3MF only. By default each plate also "
                          "carries Bambu Studio project metadata so it opens "
                          "with the right filament in each AMS slot.")
+    ap.add_argument("--rotate", type=float, default=0.0,
+                    help="degrees the square tile is turned CLOCKWISE on the "
+                         "map (use with --center/--radius or --bbox of the "
+                         "unturned square). The model is printed upright.")
+    ap.add_argument("--nameplate", default="",
+                    help="raised name on the frame's top border (A-Z, 0-9, "
+                         "space . - '). Refused if it will not fit.")
+    ap.add_argument("--nameplate-side", default="s", choices=list("nesw"),
+                    help="which side of the frame carries the name (s = front)")
+    ap.add_argument("--nameplate-rib", default="notch", choices=["notch", "none"],
+                    help="cover rib over the name: cut a notch just over the "
+                         "text, or leave the rib off that whole side")
+    ap.add_argument("--no-bridges", action="store_true",
+                    help="draw bridges as flat ground roads (and do not cut "
+                         "tunnels) instead of decks on piers")
+    ap.add_argument("--no-layer-hierarchy", action="store_true",
+                    help="debug: let greenery, roads and building footprints "
+                         "overlap instead of cutting each lower layer where a "
+                         "higher one sits")
     ap.add_argument("--printer", default="Bambu Lab P1S",
                     help="printer preset name for the Bambu project metadata")
     ap.add_argument("--nozzle", type=float, default=0.4,
@@ -4143,6 +4930,10 @@ def main():
                  box_cube=not a.no_box_cube,
                  filaments=parse_filaments(a.filaments),
                  bambu_project=not a.no_bambu_project,
+                 layer_hierarchy=not a.no_layer_hierarchy,
+                 rotate_deg=a.rotate % 360.0,
+                 nameplate=a.nameplate, nameplate_side=a.nameplate_side,
+                 nameplate_rib=a.nameplate_rib, bridges=not a.no_bridges,
                  printer_model=a.printer, nozzle_mm=a.nozzle,
                  floating_parts=a.floating_parts,
                  floating_max_aspect=a.floating_aspect,

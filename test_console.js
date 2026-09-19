@@ -189,6 +189,8 @@ const sandbox = {
   performance: { now: () => Date.now() },
   setTimeout, clearTimeout, setInterval, clearInterval,
   requestAnimationFrame: f => setTimeout(f, 0),
+  cancelAnimationFrame: t => clearTimeout(t),
+  matchMedia: () => ({ matches: false }),
   addEventListener() {}, removeEventListener() {},
   fetch: async () => ({ ok: false, json: async () => ({}) }),
   AbortController, URLSearchParams, JSZip: function () {},
@@ -1102,6 +1104,259 @@ check('the exact preview trusts the colour in the 3MF over the panel', () => {
   G.pick.buildings = G.DEFAULT_FILAMENTS.buildings;
   G.colFromPick();
 });
+
+/* ---------------- tweak without rebuilding ---------------- */
+console.log('\nchanging a built preview:');
+/* `let` state (exactLayers, centre...) is not on the sandbox global, but
+   later scripts in the same context share the script scope, so read and
+   write it by evaluating in-context. */
+const R = code => vm.runInContext(code, sandbox);
+const TILE = () => [
+  { name: 'terrain', positions: [0, 0, 0, 10, 0, 0, 0, 10, 0], indices: [0, 1, 2],
+    size: [10, 10, 1], color: '#61C680' },
+  { name: 'greenery', positions: [0, 0, 1, 4, 0, 1, 0, 4, 1], indices: [0, 1, 2],
+    size: [4, 4, 1], color: '#FFFFFF' },
+  { name: 'roads', positions: [1, 1, 1, 3, 1, 1, 1, 3, 1], indices: [0, 1, 2],
+    size: [2, 2, 1], color: '#000000' },
+];
+function built() {
+  // exactly what buildExact() does once the mesh lands
+  R(`showTab('map'); exactLayers = __T; exactKey = geomKey();
+     builtPick = Object.assign({}, pick); inflightKey = '';
+     buildExactScene(exactLayers); restyleExact();`.replace('__T', JSON.stringify(TILE())));
+}
+const meshOf = n => R(`three.root.children.find(m => m.userData && m.userData.layer === '${n}')`);
+let fetches = 0;
+const realFetch = sandbox.fetch;
+sandbox.fetch = async (...a) => { fetches++; return realFetch(...a); };
+
+check('the preview always asks for every layer, whatever is switched off', () => {
+  R(`on.greenery = false; on.roads = false;`);
+  const q = new URLSearchParams(G.exactParams());
+  eq(q.get('greenery'), '1', 'greenery'); eq(q.get('roads'), '1', 'roads');
+  ok(/greenery=/.test(q.get('filaments') || ''), 'every pick rides the build: ' + q.get('filaments'));
+  R(`on.greenery = true; on.roads = true;`);
+});
+
+check('a new colour after a build recolours in place, with no download', () => {
+  built(); fetches = 0;
+  R(`pick.roads = 'basic_blue'; colFromPick(); repaint();`);
+  const want = G.FIL(G.FILAMENTS.basic_blue.hex), c = meshOf('roads').material.color;
+  ok(Math.abs(c.r - want.r) < 1e-6 && Math.abs(c.b - want.b) < 1e-6,
+     'roads were not recoloured: ' + JSON.stringify(c));
+  ok(R('exactLayers') !== null, 'a colour change threw the model away');
+  eq(fetches, 0, 'fetches');
+  R(`pick.roads = DEFAULT_FILAMENTS.roads; colFromPick();`);
+});
+
+check('an unchanged pick keeps the colour the file carries', () => {
+  built();
+  const want = G.FIL('#61C680'), c = meshOf('terrain').material.color;
+  ok(Math.abs(c.g - want.g) < 1e-6, 'terrain lost its file colour');
+});
+
+check('switching greenery off hides it without a rebuild', () => {
+  built(); fetches = 0;
+  R(`on.greenery = false; repaint();`);
+  eq(meshOf('greenery').visible, false, 'greenery visible');
+  eq(meshOf('roads').visible, true, 'roads visible');
+  ok(R('exactLayers') !== null, 'hiding a layer threw the model away');
+  eq(fetches, 0, 'fetches');
+  R(`on.greenery = true; repaint();`);
+  eq(meshOf('greenery').visible, true, 'greenery back');
+});
+
+check('moving the tile after a build says so and offers Build preview', () => {
+  built();
+  R(`centre.lat += 0.02; tileChanged();`);
+  eq(R('exactLayers'), null, 'the stale model was kept');
+  const html = document.getElementById('prevOverlay').innerHTML;
+  ok(/tile moved/i.test(html), 'no reason given: ' + html.slice(0, 120));
+  ok(/btnBuild/.test(html), 'no Build preview button');
+  R(`centre.lat -= 0.02;`);
+});
+
+check('a changed building stretch is named as the reason', () => {
+  built();
+  const z = document.getElementById('bscale'), old = z.value;
+  z.value = String((+old || 1) + 0.5);
+  R('repaint()');
+  ok(/building stretch/i.test(document.getElementById('prevOverlay').innerHTML),
+     'reason missing');
+  z.value = old;
+});
+
+check('Cancel goes back to the Build preview button', () => {
+  R(`exactLayers = null; inflightKey = 'x'; logSteps = []; drawLog('note', true);`);
+  document.getElementById('btnCancel').click();
+  const html = document.getElementById('prevOverlay').innerHTML;
+  ok(/btnBuild/.test(html) && /Build preview/.test(html), 'no way back: ' + html.slice(0, 120));
+  ok(/cancelled/i.test(html), 'does not say it was cancelled');
+  eq(R('inflightKey'), '', 'inflightKey');
+});
+
+check('Cancel with a still-current preview shows that preview again', () => {
+  built();
+  R(`drawLog('note', true);`);
+  document.getElementById('prevOverlay').classList.remove('hidden');
+  document.getElementById('btnCancel').click();
+  ok(document.getElementById('prevOverlay').classList.contains('hidden'),
+     'the old preview stayed covered');
+});
+
+check('the tab title reports a build only while the page is away', () => {
+  const base = R('BASE_TITLE');
+  document.hidden = true;
+  R(`titleStatus('⏳ Building 1:05')`);
+  ok(String(document.title).startsWith('⏳ Building 1:05'), 'title: ' + document.title);
+  R(`titleStatus('✓ Preview ready', true)`);
+  ok(/Preview ready/.test(document.title), 'finished note missing');
+  document.hidden = false;
+  R('titleBack()');
+  eq(document.title, base, 'title after coming back');
+  eq(R('titleMsg'), '', 'a read note should clear');
+  delete document.hidden;
+  eq(G.fmtMin(125), '2:05', 'fmtMin');
+});
+
+check('a look-only change says what changed and that no rebuild happened', () => {
+  built();
+  R(`lastLook = lookNow(); showTab('prev');`);
+  R(`pick.roads = 'basic_blue'; colFromPick(); repaint();`);
+  const t = document.getElementById('prevToast');
+  ok(!t.classList.contains('hidden'), 'no note shown');
+  ok(/Roads/.test(t.innerHTML) && /Blue/.test(t.innerHTML), 'note does not name it: ' + t.innerHTML);
+  ok(/no rebuild/i.test(t.innerHTML), 'note does not say no rebuild');
+  ok(!document.getElementById('prevVeil').classList.contains('hidden'), 'no refresh veil');
+  R(`pick.roads = DEFAULT_FILAMENTS.roads; colFromPick(); showTab('map');`);
+});
+
+check('an out-of-date page is detected from the server\'s file stamp', () => {
+  R(`lastPing = {ok: true, console: 2000000000};`);
+  document.lastModified = 'Mon, 01 Jan 2024 00:00:00 GMT';
+  eq(R('pageOutdated()'), true, 'stale page not noticed');
+  R(`lastPing = {ok: true, console: Math.floor(Date.parse(document.lastModified)/1000)};`);
+  eq(R('pageOutdated()'), false, 'a current page flagged');
+  delete document.lastModified;
+  R('lastPing = null');
+});
+
+check('an out-of-date preview server is named and nothing is built', () => {
+  R(`lastPing = {ok: true, console: 0};`);                 // no api field: old server
+  eq(R('serverOutdated()'), true, 'old server not noticed');
+  R(`lastPing = {ok: true, api: API_WANT, console: 0};`);
+  eq(R('serverOutdated()'), false, 'current server flagged');
+  R('lastPing = null');
+});
+
+console.log('\nturning the tile:');
+check('a turned tile is written as centre, radius and turn; a straight one as --bbox', () => {
+  R('angle = 30');
+  const c = G.buildCmd();
+  ok(/--center \S+ \S+ --radius \d+ --rotate 30\b/.test(c) && !/--bbox/.test(c), c);
+  R('angle = 0');
+  ok(/--bbox /.test(G.buildCmd()) && !/--rotate/.test(G.buildCmd()), 'straight tile lost --bbox');
+});
+
+check('resizing a turned tile keeps the opposite corner where it was', () => {
+  R('angle = 30; placeRect(false)');
+  const a = R('tileCorners().sw'), anchor = {lat: a[0], lng: a[1]};
+  const drag = {lat: anchor.lat + 0.012, lng: anchor.lng + 0.021};
+  const sq = R(`squareFromCornerRot(${JSON.stringify(anchor)}, ${JSON.stringify(drag)})`);
+  R(`centre = {lat: ${sq.lat}, lng: ${sq.lng}}; spanM = ${sq.span};`);
+  // one of the new corners must sit on the anchor
+  const cs = Object.values(R('tileCorners()'));
+  const d = Math.min(...cs.map(c => Math.hypot((c[0]-anchor.lat)*111320,
+    (c[1]-anchor.lng)*111320*Math.cos(anchor.lat*Math.PI/180))));
+  ok(d < 0.5, 'the anchor corner moved ' + d.toFixed(2) + ' m');
+  R('angle = 0; centre = {lat:43.6455, lng:-79.3860}; spanM = 1600; placeRect(false)');
+});
+
+console.log('\nthe name on the frame:');
+check('a name is cleaned, measured and cut before it would not fit', () => {
+  R(`setPlate('spa  francorchamps')`);
+  eq(R('plate'), 'SPA FRANCORCHAMPS', 'cleaned name');
+  R(`setPlate('W'.repeat(60))`);
+  ok(R('plateWidth(plate) <= plateRoom()'), 'a name wider than the frame side got through');
+  ok(R('plate.length') > 5 && R('plate.length') < 60, 'not trimmed sensibly: ' + R('plate.length'));
+  ok(/longest name/.test(document.getElementById('plateNote').innerHTML), 'no note about the cut');
+  R(`setPlate('café & bar')`);
+  ok(!/[&É]/.test(R('plate')), 'unprintable characters kept: ' + R('plate'));
+  R(`setPlate('SPA')`);
+  const c = G.buildCmd();
+  ok(/--nameplate "SPA" --nameplate-side s/.test(c), c);
+  ok(/name=basic_black/.test(c), 'the name colour is not in the code: ' + c);
+  R(`setPlate('')`);
+  ok(!/--nameplate/.test(G.buildCmd()), 'an empty name still in the code');
+});
+
+check('the name follows the frame colour until it gets its own', () => {
+  R(`setPlate('SPA'); nameFollowsFrame = true; pick.name = pick.frame;`);
+  const pickTo = (layer, key) => R(`(() => { const b = {dataset:{pickfor:'${layer}', key:'${key}'}};
+      pick[b.dataset.pickfor] = b.dataset.key;
+      if(b.dataset.pickfor === 'name') nameFollowsFrame = false;
+      if(b.dataset.pickfor === 'frame' && nameFollowsFrame) pick.name = pick.frame; })()`);
+  pickTo('frame', 'basic_blue');
+  eq(R('pick.name'), 'basic_blue', 'name did not follow the frame');
+  pickTo('name', 'basic_red'); pickTo('frame', 'basic_black');
+  eq(R('pick.name'), 'basic_red', 'the buyer\'s own name colour was overwritten');
+  R(`pick.frame = DEFAULT_FILAMENTS.frame; pick.name = pick.frame; nameFollowsFrame = true; setPlate('')`);
+});
+
+console.log('\nopening and remembering a code:');
+check('a copied code opens back into exactly the same order', () => {
+  R(`angle = 25; centre = {lat: 50.4372, lng: 5.9714}; spanM = 1650; setPlate('SPA-FRANCORCHAMPS');
+     setPlateSide('n'); pick.roads = 'basic_blue'; on.greenery = false; placeRect(false)`);
+  const s1 = G.buildCmd();
+  R(`angle = 0; centre = {lat: 1, lng: 1}; spanM = 900; setPlate(''); pick.roads = 'basic_black'; on.greenery = true;`);
+  const r = R(`parseCmd(${JSON.stringify(s1)})`);
+  ok(!r.error, r.error);
+  R(`applyCmd(parseCmd(${JSON.stringify(s1)}).state)`);
+  eq(G.buildCmd(), s1, 'round trip');
+  // a straight tile round-trips too (through --bbox)
+  R('angle = 0; placeRect(false)');
+  const s2 = G.buildCmd();
+  R(`applyCmd(parseCmd(${JSON.stringify(s2)}).state)`);
+  const s3 = G.buildCmd();
+  R(`applyCmd(parseCmd(${JSON.stringify(s3)}).state)`);
+  eq(G.buildCmd(), s3, 'straight round trip is not stable');
+  R(`pick.roads = DEFAULT_FILAMENTS.roads; on.greenery = true; setPlate(''); setPlateSide('s');
+     centre = {lat:43.6455, lng:-79.3860}; spanM = 1600; placeRect(false)`);
+});
+
+check('a code with one bad part changes nothing and says which part', () => {
+  const before = G.buildCmd();
+  const r = R(`parseCmd('python map2model.py --bbox 5.95 50.42 5.98 50.44 --size 200 --filaments roads=basic_rainbow')`);
+  ok(r.error && /basic_rainbow/.test(r.error), 'error does not name the bad colour: ' + r.error);
+  eq(G.buildCmd(), before, 'a rejected code still changed the page');
+  ok(R(`parseCmd('hello there')`).error, 'nonsense accepted');
+  ok(/tile/.test(R(`parseCmd('python map2model.py --size 200')`).error), 'a code with no tile accepted');
+  const c = R(`parseCmd('python map2model.py --center 50.4 5.9 --size 150')`);
+  ok(!c.error && c.state.span === 2000, '--center without --radius should use the 1000 m default');
+});
+
+check('the last order is restored from this device', () => {
+  const code = 'python map2model.py --center 50.43720 5.97140 --radius 800 --rotate 12 --size 150 -o spa.3mf';
+  sandbox.localStorage.setItem('m2m.last.v1', code);
+  ok(R('restoreLast()'), 'nothing restored');
+  eq(R('angle'), 12, 'angle'); eq(R('sizeMM'), 150, 'size'); eq(R('spanM'), 1600, 'span');
+  sandbox.localStorage.store = null;                      // blocked storage
+  eq(R('restoreLast()'), false, 'blocked storage should just skip');
+  sandbox.localStorage.store = {};
+  R(`angle = 0; sizeMM = 200; centre = {lat:43.6455, lng:-79.3860}; spanM = 1600; placeRect(false)`);
+});
+
+console.log('\npreview extras:');
+check('view buttons move the camera; Save picture names the file after the tile', () => {
+  built();
+  R(`setView('top')`); ok(R('three.cam.el') > 1.4, 'top view is not from above');
+  R(`setView('front')`); ok(Math.abs(R('three.cam.az') - Math.PI/2) < 1e-9, 'front view is not the front');
+  R(`three.renderer.domElement.toDataURL = () => 'data:image/png;base64,AA'; setPlate('Big Ben')`);
+  eq(R('savePicture()'), 'big-ben-preview.png', 'file name');
+  R(`setPlate('')`);
+});
+
+sandbox.fetch = realFetch;
 
 /* ---------------- results ---------------- */
 console.log('\n' + '-'.repeat(52));

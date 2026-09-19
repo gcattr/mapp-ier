@@ -13,13 +13,14 @@ files.
 | `serve.py` | Local HTTP server: serves the console AND runs the exporter behind it. |
 | `map2model-console.html` | The web console. Single file, no build step. |
 | `test_console.js` | Offline harness for the console: stubs the DOM, Leaflet and three.js and invokes every top-level function. `node test_console.js`. |
-| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 46 checks covering everything after geometry: filament assignment, 3MF contents, slicer round-trip. `python test_export.py`. |
+| `test_export.py` | Offline exporter tests — no network, no DuckDB, throwaway tetrahedra. 62 checks covering everything after geometry (filament assignment, 3MF contents, slicer round-trip), plus the fetch plumbing and an offline run() of a synthetic tile for the layer hierarchy. `python test_export.py`. |
 | `verify_bambu.py` | Loads each plate shape through the Bambu Studio CLI, has it re-export, and reads the filaments and per-part extruders back out. Skips cleanly when Bambu Studio is not installed. See **Verifying it**. |
 | `bambu_p1s_0.4.json` | A P1S 0.4 nozzle project config that Bambu Studio itself wrote (v02.05.00.66). `_project_settings()` widens its per-slot lists and writes our filaments in. Version-coupled — see **Known gaps**. |
 | `landmarks.json` | Per-building shape overrides (CN Tower legs and mast). The console asks for it on every build (`landmarks: 'landmarks.json'`) and `serve.py` skips it **silently** when it is absent — so if it goes missing the CN Tower renders as straight prisms in preview *and* export, with no warning anywhere. It is tracked in git for exactly that reason. |
 | `Bambu_PLA_Basic_Hex_Code.pdf`, `Bambu_PLA_Matte_Hex_Code.pdf` | Bambu's own filament hex tables. The source of truth for every colour in `FILAMENTS`; keep them, and re-read them rather than trusting a hex you remember. |
 | `photo.png` | Reference screenshot: a land plate open in Bambu Studio's Prepare tab with four PLA Basic filaments already in slots 1–4. Proof the Bambu project metadata does what **Bambu Studio project metadata** claims. |
 | `test_offline.py` | **MISSING from this folder.** Offline fixture — stubs `fetch_all()` so you can test without network. Never committed and not in the Recycle Bin, so it has to be rewritten; the Testing section below cannot run until it is. |
+| `fonts/ArchivoBlack-Regular.ttf`, `fonts/OFL.txt` | The name-plate font (SIL OFL 1.1 — free to embed and ship commercially; keep `OFL.txt` beside it). |
 | `cmd2mac.py` | Rewrites an Etsy-order command's `python map2model.py …` prefix to `python3 …` so it runs on macOS. Interpreter prefix only; every build flag passes through. `python3 cmd2mac.py --clip` converts the clipboard in place. `--selftest` for the 12 pinned cases. |
 
 ## Running it
@@ -47,7 +48,9 @@ python map2model.py --bbox W S E N --size 200 --roofs all \
   --frame-clearance 0.3 -o city.3mf
 ```
 
-Dependencies: `duckdb shapely numpy pyproj trimesh mapbox_earcut pillow requests`
+Dependencies: `duckdb shapely numpy pyproj trimesh mapbox_earcut pillow requests fonttools`
+(`fonttools` draws the name plate; the system `python3` on the Mac lacks it, so run
+the exporter, `serve.py` and `test_export.py` with `.venv/bin/python`).
 
 ## Architecture
 
@@ -550,6 +553,39 @@ This does not change the empty-result handling: `_confirm_empty()` still runs
 per layer, and `FETCH_ERRORS` is appended under the same lock-free pattern it
 always used (each worker touches a different layer key).
 
+**Only the files that cover the tile (STAC index), 2026-09-18.** Overture
+publishes `https://stac.overturemaps.org/<release>/collections.parquet`
+(~240 KB): one row per GeoParquet file with its bbox and S3 path.
+`stac_files()` loads it once per process (`_STAC_INDEX`) and `fetch()` reads
+`read_parquet([only the overlapping files])` instead of the `type=*/*` glob,
+which had to open the footer of all 128 / 512 files to prune them. Measured
+on the Spa tile, same row counts: roads 29 s → 2.7 s, buildings 90 s → 2.4 s;
+the whole CLI build is now ~13 s. If the index fails or lacks the type, it
+falls back to the glob (`use_stac_index=False` forces that). An index that
+says *no* file overlaps is trusted as a genuinely empty layer.
+
+**Same-area rebuilds don't re-download.** `fetch_cached()` wraps
+`fetch_all()`: with `Config.fetch_cache` (serve.py sets it; the CLI doesn't)
+the rows are kept in `FETCH_CACHE` (LRU of 4) keyed on the area and the layer
+set, **not** on meshing settings, and handed out as a `deepcopy`. Only a
+clean fetch is stored — anything in `FETCH_ERRORS`, or a failed OSM raceway
+supplement (`_SOFT_FAILED`), is never replayed. Measured through serve.py:
+15 s first build, 4 s for the same tile with a new building stretch.
+
+**Roads: `service`, `track`, and race tracks from OSM.** The default
+`road_classes` used to stop at `pedestrian`; round the Spa circuit 200 of 274
+Overture segments are `service` or `track`, so the plate printed two roads.
+Both are in now, plus `unknown`, with `road_skip_subclasses` dropping car-park
+aisles, driveways and drive-throughs (`subclass` is fetched for this).
+Overture has **no raceways at all** — OSM `highway=raceway` never reaches its
+transportation theme — so `fetch_osm_raceways()` adds them from Overpass as
+class `raceway` (14 m wide), running as a 7th parallel job
+(`[layer] raceways:`). Best effort by design: it tries `OVERPASS_MIRRORS` once
+each and a total outage costs only the raceway, with a `[warn]`
+(`osm_raceways=False` to skip). Spa, live: 35 raceway ways, the full circuit
+on the roads plate, `verify_bambu` PASS. Thin `service`/`track` roads at
+coarse scales (~20 m/mm) come out ~0.2 mm wide — narrower than the nozzle.
+
 **Per-layer status.** Each worker prints `[layer] <name>: fetching` when it
 starts and `[layer] <name>: <N> rows in <t>s` (or `empty` / `failed`) when it
 finishes — from *inside* the worker, because `pool.map` yields in job order,
@@ -801,6 +837,124 @@ a GPX export like any other. The console's route panel says exactly this.
 has real relief (`not terr.flat`) — otherwise a hillside circuit with no water
 in frame, or a dry terrain tile, would be refused. Each mode gets its own
 error message.
+
+## Bridges and tunnels (2026-09-18)
+
+Overture scopes `road_flags` (`is_bridge`, `is_tunnel`) and `level_rules`
+(z-order) to a `between` = [a, b] **fraction** of each segment — Westminster
+Bridge is `is_bridge` over [0, 0.25] at level 1. `split_road_levels()` cuts
+every segment at every range end and classes each stretch at its midpoint:
+ground, bridge (a positive level counts, even unflagged) or tunnel (a
+negative level counts). Tunnels are dropped — they used to be drawn on the
+surface. Bridges are pulled out **before** the water cut (which used to cut
+every river crossing away) and go to `build_bridges()`:
+
+- a deck the road's width, `bridge_deck_mm` thick, running straight between
+  the road surface at its two ends (never the DEM over the river), ramping up
+  `level × bridge_level_mm` over the first and last fifth. The buffered deck
+  is `segmentize`d — a buffer of a straight line is four corners, and a ramp
+  needs vertices along it;
+- piers at mapped `base/infrastructure` `bridge_support` points (a 7th
+  parallel fetch job, riding in the roads list tagged by class so `fetch_all`
+  keeps its five-tuple), else every `bridge_pier_mm`. Over water a pier runs
+  to z=0 and rests on the water plate. **"Over water" is "within a road-width
+  of the water", not "inside it"**: OSM draws each pier as an island, so the
+  river polygon has a hole exactly where every pier stands — the strict test
+  put all four Westminster piers on "land" and skipped them.
+
+Decks and piers join the **roads** mesh: no new filament. Live Westminster:
+2 decks (the rest are footways/cycleways, not printed classes), 4 piers to
+the water plate at the mapped positions, 22 tunnel stretches dropped.
+`--no-bridges` restores flat roads.
+
+## Name plate on the frame (2026-09-18)
+
+`--nameplate "TEXT" --nameplate-side n|e|s|w --nameplate-rib notch|none`.
+Raised (`nameplate_mm` 0.6) capitals on the frame's **top** border, centred
+on the chosen side, reading from outside it. Object `name` on the frame
+plate; its colour follows the frame's (`filament_of`) unless picked, so by
+default it shares the frame's slot — no extra swap.
+
+- **Font**: Archivo Black via `fontTools`, contours combined even-odd.
+  Uppercase A–Z, 0–9, space `. - ' ·` only. At the 4.4 mm cap height the
+  6 mm border allows, a comma's tail is 33% under 0.9 mm and `&` 8%, so both
+  are refused (write AND). Every stroke grows by `NAMEPLATE_THICKEN`
+  (0.05 mm) and letter spacing by twice that; `test_export.py` checks every
+  allowed glyph with a morphological opening at `min_feature_mm`.
+- **Length is a hard limit, never a shrink**: width must leave
+  `nameplate_corner_mm` (20 mm) of border at each end. `run()` refuses a long
+  name *before any download*. The console measures the same width from
+  `PLATE_ADV` (the font's advance widths) and trims as you type;
+  `test_export.py` pins `PLATE_ADV`, `PLATE_CHARS` and the constants against
+  the font so the two can never disagree.
+- **Cover**: the rib grips the frame top with ~0.8 mm of air, so raised
+  letters would jam it. `build_box(..., notch=)` subtracts the name's run of
+  border (+1 mm) from the **rib ring only** — lip, walls and corner posts are
+  untouched and the rib still holds the corners and other sides. `none`
+  removes the rib along that whole side between the corner allowances.
+  Checked by slicing the cover at rib height.
+- Square tiles only (hex/circle frames have no straight side).
+
+## Rotated tiles (2026-09-18)
+
+`--rotate DEG` = the square turned that many degrees **clockwise** on the
+map; with `--center LAT LON --radius R` (or `--bbox` of the unturned
+square). `Projector(bbox, rotate_deg)` turns projected coordinates back about
+the tile centre (`xy()`, `geom()`, `to_lonlat()` all go through it), so
+layers, `tile_poly`, and the DEM sampler all see an upright square and the
+model prints straight. `run()` keeps the square in `cfg._square_bbox` and
+widens `cfg.bbox` to `proj.envelope_lonlat()` for the fetch and DEM.
+**Compass bearings must be corrected**: `roof:direction` is reduced by
+`rot_deg` in `build_buildings` — `test_export.py` builds a scene and the same
+scene turned 30° on a 30°-turned tile and requires identical meshes, and that
+test fails if the correction is removed (checked). The landmark centre used
+`proj.fwd` directly and now uses `proj.xy()`.
+
+Console: the tile is an `L.polygon` (`tileCorners()`), a round rotate handle
+sits above it (snaps to whole degrees and to straight within 2°;
+double-click or **Straighten** resets), corner resize uses
+`squareFromCornerRot()` in the tile's own frame. A straight tile still
+writes `--bbox`, so every old code means the same thing.
+
+## Preview extras and codes (2026-09-18)
+
+- **Top / Front / Angle** view buttons (`setView`), **Spin** turntable
+  (stops on any touch of the model; does nothing under
+  `prefers-reduced-motion`), **Save picture** (renders then `toDataURL` in
+  the same task — no `preserveDrawingBuffer` — named after the name or file).
+- **Open a code…**: `parseCmd()` is `buildCmd()` backwards; it validates
+  everything before `applyCmd()` touches the page, so a code with one bad
+  part changes nothing and names that part. Round trip is pinned by a test.
+- **Remembered**: the copied code is saved to `localStorage['m2m.last.v1']`
+  on every change (debounced) and restored at start-up; **Start fresh**
+  clears it.
+- **Outdated server**: `/api/ping` returns `api` (`serve.py` `API = 3`); a
+  page needing more (`API_WANT`) refuses to build and says to restart the
+  server. Bump both when the console starts relying on new server behaviour.
+
+## Licences & credits (checked 2026-09-18)
+
+All free for commercial use; the obligations are credits.
+
+| Source | Licence | Obligation |
+|---|---|---|
+| Overture: roads, buildings, water, land use, bridges | ODbL (OSM) | "© OpenStreetMap contributors" wherever the product is seen |
+| Overture land cover | CC BY 4.0 (ESA WorldCover) | "© ESA WorldCover project / Contains modified Copernicus Sentinel data processed by ESA WorldCover consortium" |
+| AWS terrarium elevation | public domain + CC BY / open-government sources | credit, e.g. "Terrain: USGS SRTM/GMTED, Copernicus EU-DEM and others" |
+| OSM map tiles in the console | OSM tile policy | commercial use allowed but can be withdrawn; fine at Etsy volume, move to a hosted provider if it grows |
+| Nominatim | OSM policy | ≤1 req/s, no search-as-you-type (explicit Find complies) |
+| Overpass | per instance | private.coffee allows any project — **first** in every mirror list; overpass-api.de discourages public apps — last |
+| OpenFreeMap | MIT, commercial explicitly OK | credit OpenMapTiles/OSM |
+| Leaflet / three.js / MapLibre / JSZip | BSD-2 / MIT / BSD-3 / MIT | — |
+| Google Fonts in the page, Archivo Black | SIL OFL 1.1 | ship `fonts/OFL.txt` with the font |
+| Python deps | MIT / BSD / ISC / Apache-2.0 / MIT-CMU | — |
+| `bambu_p1s_0.4.json` | a settings file Bambu Studio (AGPL-3.0) wrote, not copied source | low risk |
+
+Physical prints are ODbL "Produced Works": put a credit where the buyer sees
+it — the Etsy listing plus a card in the box: *"Map data © OpenStreetMap
+contributors, Overture Maps Foundation · Land cover © ESA WorldCover ·
+Terrain: USGS, Copernicus and others."* The preview's credit line says the
+same. Not covered by any of this: landmark trademarks (see Known gaps).
 
 ## The cover
 
@@ -1091,6 +1245,56 @@ branch now leaves `#rWarn` empty; the equivalent note ("features down to about
 N m come through cleanly") still lives in the Tile panel's own `sizeNote`,
 where a buyer is already looking.
 
+**Colours and layer switches never rebuild, 2026-09-18.** The exact preview
+now always builds **every** city layer with **every** pick
+(`exactParamObj()`), and the buyer's switches and colours are applied to that
+model in place by `restyleExact()` (mesh `userData.layer`, `visible`, material
+colour). A colour the buyer has not changed since the build keeps the colour
+the 3MF carries (`builtPick`), so "the file wins" still holds. What *does*
+need a rebuild is `geomKey()` — `exactParamObj()` minus `LOOK_ONLY` (layer
+switches, filaments). `checkStale()` runs from `repaint()` and `tileChanged()`;
+on a mismatch `previewStale()` names what changed in buyer words
+(`whatChanged()` / `CHANGE_WORDS`: "The tile moved", "The building stretch
+changed"…), aborts a build still running for the old settings
+(`inflightKey`), and puts the Build button back. This also fixed a silent
+bug: `tileChanged()` only checked `cache` (the dead tile path), so moving the
+tile after an exact build kept showing the old model with no warning. Hiding
+roads or buildings leaves their footprint cut out of the greenery in the
+preview (the hierarchy cut it); the legend says so with a Rebuild button.
+The copied command is untouched — it still lists only what is switched on.
+
+**It shows that it refreshed, and an old tab cannot fake it, 2026-09-18.**
+A look-only change runs `lookRefresh()`: the colours change at once under a
+short veil (`#prevVeil`, "Updating colours…" / "Updating the model…"), then
+a note (`#prevToast`) names what changed — "✓ Greenery → Dark Green · Same
+model and tile — no rebuild needed". `lastLook` is the look the model was
+last drawn with, so nothing flashes when nothing changed. The first report
+of "colours need a rebuild" was **a tab left open across the update**: the
+old script, running against the new server, still sent layer switches in
+the build and could not recolour. Two guards: `serve.py` sends
+`Cache-Control: no-store` on every non-API response, and `/api/ping` returns
+the console file's mtime (`console`); `pingServer()` now runs on every build
+and `pageOutdated()` compares it with `document.lastModified` — an older
+page refuses to build and offers **Reload the page**. Verified live in
+Chrome on a Spa tile: recolour and greenery-off with one `/api/start` in
+total, stretch change → "The building stretch changed" → 6.4 s cached
+rebuild, Cancel → Build prompt, outdated tab → reload prompt.
+
+**Rebuilds reuse elevation tiles too.** `Terrain._load` fetched terrarium
+PNGs one at a time on every build; it now fetches in parallel (8) and keeps
+decoded tiles in `_DEM_TILES` (256 max, ~64 MB). `fetch_cached()` also
+serves a build that wants FEWER layers from an entry fetched with more.
+
+**Cancel goes back somewhere.** `cancelBuild()`: if the last preview still
+matches the panel it is shown again, otherwise `showBuildPrompt()` — the one
+renderer for the Build preview prompt (start-up copy, stale, cancelled).
+
+**The tab title reports a build while the buyer is away.** `titleStatus()`
+prefixes `⏳ Building m:ss` / `✓ Preview ready` / `⚠ Preview failed` to
+`document.title` **only** when the page is hidden or unfocused; a
+finished/failed note sticks until they come back (`titleBack()` on focus /
+`visibilitychange`), then clears.
+
 ## What is deliberately not in the console
 
 - **A "Detail" panel** (data source, LOD, roof mode, ridge height). A buyer
@@ -1133,7 +1337,7 @@ What it covers is everything *after* geometry: which filament each layer gets,
 what lands in the 3MF, and whether a slicer can read it back.
 
 ```bash
-python test_export.py                   # 46 checks, exit 0 = clean
+.venv/bin/python test_export.py         # 62 checks, exit 0 = clean
 ```
 
 Every check in it is a bug that shipped. The cover one in particular: the cover
@@ -1163,7 +1367,7 @@ a call to a function that no longer exists passes cleanly. This bit twice
 `test_console.js` is that harness. No dependencies, no network, no browser:
 
 ```bash
-node test_console.js                    # 71 checks, exit 0 = clean
+node test_console.js                    # 91 checks, exit 0 = clean
 node test_console.js old-console.html   # point it at an older copy
 ```
 
@@ -1216,23 +1420,23 @@ that says `Message me on Etsy for any issues`; it asks the buyer to include the
 place, a screenshot and the copied personalisation code. Keep this wording
 customer-facing and jargon-free.
 
-### Confirmed Spa greenery/road overlap bug
+### Layer hierarchy (the Spa greenery/road overlap) — fixed 2026-09-18
 
-A real City-mode build centred on Spa-Francorchamps was inspected from its
-generated 3MF, not inferred from the preview. Greenery covers 37,652.4 mm²
-(94.1% of the 200 mm square); that coverage is geographically plausible because
-the circuit is in dense mapped forest, so it is not by itself the old
-continent-sized blanket bug. The actual bug is layer precedence: 516.7 of
-525.8 mm² of road footprint (98.3%) overlaps greenery, while greenery is 0.8 mm
-proud and roads only 0.5 mm. `run()` dissolves both and subtracts water from
-each, but never subtracts roads from greenery before `build_drape()`, so
-greenery can physically mask nearly every road. Turning greenery off is only a
-workaround. The likely fix is to difference the dissolved road union from
-`green_p` before meshing, with exporter tests proving overlap is zero and the
-parts stay watertight. This has been diagnosed but **not fixed**.
+A real Spa-Francorchamps build had 98.3% of its road footprint under greenery:
+greenery is 0.8 mm proud, roads 0.5 mm, and `run()` only ever subtracted
+water from them. Now there is a fixed precedence, **water > buildings > roads
+> greenery > terrain**, applied in `run()` right after the water cut: ground-
+level building footprints (`min_height` ≤ 0.5 m, so a bridge or overhang does
+not punch a hole in the road under it) are cut out of roads and greenery, and
+the road union is cut out of greenery, then both are re-`dissolve`d to clear
+slivers. A layer that is **switched off cuts nothing** — greenery on a
+`--no-roads` build has no road-shaped holes. `Config.layer_hierarchy`
+(`--no-layer-hierarchy` to debug). `test_export.py` "layers do not fight"
+builds a synthetic road-through-forest tile offline and measures the overlap:
+8,526 m² with the hierarchy off, 0 with it on.
 
-The console harness currently passes **71/71** after the search, FAQ and paused
-mode changes. `BUGMAC.png` is an unrelated untracked user file and was
+The console harness passed **71/71** after the search, FAQ and paused
+mode changes (**82/82** after the 2026-09-18 preview changes). `BUGMAC.png` is an unrelated untracked user file and was
 deliberately not added.
 
 ## Known gaps / next steps

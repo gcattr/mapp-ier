@@ -41,6 +41,11 @@ except Exception as exc:                                    # pragma: no cover
     raise SystemExit(1)
 
 PORT = int(os.environ.get("PORT", "8000"))
+# Bump when the console starts relying on new server behaviour. The console
+# refuses to build against an older one and says to restart it - a server left
+# running across an update is how "colour changes need a rebuild" came back.
+API = 3
+
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 KEEP_JOBS = 6
@@ -87,6 +92,11 @@ def cfg_from(q):
         size_mm=num("size", 200.0),
         max_building_mm=num("max_building_mm", 0.0),
         tile_shape=q.get("shape", ["square"])[0],
+        # bbox is the UNTURNED square; rotate turns it clockwise on the map
+        rotate_deg=num("rotate", 0.0) % 360.0,
+        nameplate=q.get("nameplate", [""])[0],
+        nameplate_side=q.get("nameplate_side", ["s"])[0],
+        nameplate_rib=q.get("nameplate_rib", ["notch"])[0],
         mode=q.get("mode", ["city"])[0],
         terrain_bands=int(num("terrain_bands", 1)),
         terrain_relief_mm=num("terrain_relief_mm", 0.0),
@@ -123,6 +133,9 @@ def cfg_from(q):
         frame_clearance_mm=num("frame_clearance", 0.3),
         frame_floor_mm=num("frame_floor", 2.0),
         verbose=True,
+        # A rebuild of the same area (new stretch, size, frame...) reuses the
+        # rows the last build fetched instead of re-scanning S3 for minutes.
+        fetch_cache=True,
     )
     fil = q.get("filaments", [""])[0]
     if fil:
@@ -229,6 +242,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=HERE, **kw)
 
+    def end_headers(self):
+        # Never let the browser reuse a stale copy of the console. A tab left
+        # open across a server update kept running the OLD script against the
+        # NEW exporter - colour changes forced a rebuild the new console does
+        # not need, and nothing on screen said the page was out of date.
+        if not (self.path or "").startswith("/api/"):
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def log_message(self, fmt, *args):
         if "/api/status" not in (self.path or ""):
             sys.stderr.write("  %s\n" % (fmt % args))
@@ -247,7 +269,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         q = parse_qs(u.query)
 
         if u.path == "/api/ping":
-            return self._json({"ok": True, "version": getattr(
+            # `console` lets an open tab notice the file changed under it
+            # (it compares against its own document.lastModified)
+            try:
+                stamp = int(os.path.getmtime(
+                    os.path.join(HERE, "map2model-console.html")))
+            except OSError:
+                stamp = 0
+            # `api` is bumped whenever the console starts depending on new
+            # server behaviour, so a page can tell a stale server apart
+            return self._json({"ok": True, "api": API, "console": stamp, "version": getattr(
                 map2model, "__version__", "?")})
 
         if u.path == "/api/start":
